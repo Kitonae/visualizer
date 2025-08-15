@@ -222,7 +222,7 @@ local function execute_command(cmd)
             M.log("NDI Initialized: " .. tostring(ndi.is_initialized()))
             M.log("NDI Streaming: " .. tostring(ndi.is_streaming()))
             M.log("NDI Mode: " .. ndi.get_mode())
-        elseif args[1] == "info" then
+    elseif args[1] == "info" then
             local ndi = require("ndi")
             M.log("=== NDI Information ===")
             M.log("Initialized: " .. tostring(ndi.is_initialized()))
@@ -232,8 +232,18 @@ local function execute_command(cmd)
             M.log("Expected Resolution: 800x600")
             M.log("Expected Frame Rate: 60fps")
             M.log("Pixel Format: RGBA")
+        elseif args[1] == "dump" then
+            -- Support simplified: ndi dump <n> <dir>
+            local n = tonumber(args[2]) or 0
+            local dir = args[3] or ""
+            local ndi = require("ndi")
+            if ndi and ndi.dump_frames_request then
+                ndi.dump_frames_request(n, dir)
+                M.success(string.format("NDI: dumping %d frames to %s", n, dir ~= "" and dir or "."))
+            else
+                M.error("NDI dump not available")
+            end
         end
-        
     elseif command == "shader" then
         if #args == 0 or args[1] == "list" then
             M.log("Available shaders:")

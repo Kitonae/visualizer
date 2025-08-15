@@ -18,6 +18,53 @@ local ndi_sender = nil
 local capture_canvas = nil
 local ndi_frame_buffer = nil  -- Persistent buffer for frame data
 local frame_counter = 0  -- Frame counter for timestamps
+-- Debug: frame dump controls
+M.dump_frames = 0       -- number of frames left to dump
+M.dump_dir = nil        -- optional directory to write dumps to
+
+-- Request saving N frames to disk (optional dir). Call at runtime: ndi.dump_frames(3, 'C:\temp')
+function M.dump_frames_request(n, dir)
+    n = tonumber(n) or 0
+    if n <= 0 then return end
+    M.dump_frames = n
+    if dir and #dir > 0 then
+        -- Try to create directory if it doesn't exist (Windows mkdir)
+        local ok, err = pcall(function()
+            -- Use mkdir -p style via os.execute; redirect errors to NUL on Windows
+            os.execute('cmd /c "if not exist "'..dir..'" mkdir "'..dir..'""')
+        end)
+        M.dump_dir = dir
+    else
+        M.dump_dir = nil
+    end
+    print(string.format("NDI: will dump %d frames to %s", M.dump_frames, tostring(M.dump_dir or '(save dir)')))
+end
+
+-- Immediately dump the current capture canvas to disk (one-shot)
+function M.dump_now(dir)
+    if not capture_canvas then
+        print("NDI dump_now: no capture canvas available")
+        return false
+    end
+    local imageData = capture_canvas:newImageData()
+    if not imageData then
+        print("NDI dump_now: failed to get imageData")
+        return false
+    end
+    local outdir = dir or M.dump_dir or "."
+    pcall(function()
+        os.execute('cmd /c "if not exist "'..outdir..'" mkdir "'..outdir..'""')
+    end)
+    local file_path = string.format("%s\\ndi_dump_now_%d.png", outdir, os.time())
+    local ok, err = pcall(function() imageData:encode("png", file_path) end)
+    if ok then
+        print("NDI: dumped current canvas to " .. file_path)
+        return true
+    else
+        print("NDI: failed to dump current canvas: " .. tostring(err))
+        return false
+    end
+end
 
 -- NDI type definitions
 pcall(function()
@@ -320,74 +367,113 @@ function M.end_capture_and_send()
         -- Convert RGBA to BGRA for NDI compatibility
         local data_size = width * height * 4
         
-        -- MINIMAL TEST: Use malloc like official examples
-        local data_size = width * height * 4
-        local test_buffer = ffi.C.malloc(data_size)
-        if test_buffer == nil then
-            print("Failed to allocate test buffer")
-            return false
-        end
-        
-        local test_ptr = ffi.cast("uint8_t*", test_buffer)
-        
-        -- Fill with simple pattern like official NDI examples
-        local frame_counter = math.floor(love.timer.getTime() * 10) % 2  -- Blink pattern
-        local color_value = frame_counter == 0 and 255 or 0
-        
-        -- Simple memset-like pattern (like the official example)
-        for i = 0, data_size - 1, 4 do
-            test_ptr[i] = color_value     -- B
-            test_ptr[i + 1] = color_value -- G
-            test_ptr[i + 2] = color_value -- R
-            test_ptr[i + 3] = 255         -- A
-        end
-        
-        -- Debug: Check if pixel data is actually changing
-        local sample_pixel_r = color_value  -- R channel value
-        local sample_pixel_g = color_value  -- G channel value  
-        local sample_pixel_b = color_value  -- B channel value
-        
-        -- Create NDI video frame
+    -- Runtime-selectable test formats: 'BGRA' (default) or 'UYVY' (fallback)
+    -- You can change M.send_format at runtime (e.g. ndi.send_format = 'UYVY')
+    local send_format = M.send_format or 'BGRA'
+
+    -- Prepare video frame object
         local video_frame = ffi.new("NDIlib_video_frame_v2_t")
-        
-        -- Initialize all fields properly
         ffi.fill(video_frame, ffi.sizeof("NDIlib_video_frame_v2_t"), 0)
-        
         video_frame.xres = width
         video_frame.yres = height
         video_frame.frame_rate_N = 60
         video_frame.frame_rate_D = 1
         video_frame.picture_aspect_ratio_N = width
         video_frame.picture_aspect_ratio_D = height
-        video_frame.frame_format_type = 1  -- Progressive (like the examples)
-        video_frame.FourCC = 0x41524742  -- BGRA format (standard)
-        video_frame.timecode = 0  -- Set to 0 like examples
-        video_frame.line_stride_in_bytes = width * 4  -- Explicit stride calculation
-        -- Use simple time-based timestamp
-        local current_time = love.timer.getTime()
-        video_frame.timestamp = math.floor(current_time * 1000000)  -- Convert to microseconds
-        
-        -- Debug timestamp
-        if math.floor(current_time) % 2 == 0 and math.fmod(current_time, 1) < 0.016 then  -- Every 2 seconds
-            print(string.format("Current time: %.3f, timestamp: %d", current_time, video_frame.timestamp))
-        end
-        video_frame.p_metadata = ffi.cast("char*", 0)  -- No metadata
-        
-        -- Use malloc'd buffer (like official examples)
-        video_frame.p_data = test_ptr
-        
-        -- Send frame synchronously - this should work now
-        ndi_lib.NDIlib_send_send_video_v2(ndi_sender, video_frame)
-        
-        -- Free the buffer immediately after sending (like examples)
-        ffi.C.free(test_buffer)
-        
-        -- Debug output (only occasionally to avoid spam)
-        if love.timer.getTime() % 2 < 0.016 then  -- Every ~2 seconds
-            print(string.format("NDI frame sent: %dx%d at %.2f fps (BGRX) - %d connections", 
-                width, height, love.timer.getFPS(), num_connections))
-            print(string.format("Frame data: ptr=%s, stride=%d, fourcc=0x%08X, timestamp=%d", 
-                tostring(video_frame.p_data), video_frame.line_stride_in_bytes, video_frame.FourCC, video_frame.timestamp))
+        video_frame.frame_format_type = 1  -- Progressive
+        video_frame.timecode = 0
+        video_frame.timestamp = 0  -- Let NDI handle timing (auto)
+        video_frame.p_metadata = ffi.cast("char*", 0)
+
+    if send_format == 'BGRA' then
+            -- BGRA: 4 bytes per pixel
+            local bgra_size = width * height * 4
+            local test_buffer = ffi.C.malloc(bgra_size)
+            if test_buffer == nil then
+                print("Failed to allocate BGRA test buffer")
+                return false
+            end
+            local ptr = ffi.cast("uint8_t*", test_buffer)
+
+            -- Simple checker pattern in BGRA (B,G,R,A)
+            local frame_counter = math.floor(love.timer.getTime() * 2) % 2
+            local bright = frame_counter == 0 and 255 or 16
+            for i = 0, bgra_size - 1, 4 do
+                ptr[i] = bright     -- B
+                ptr[i + 1] = bright -- G
+                ptr[i + 2] = bright -- R
+                ptr[i + 3] = 255    -- A
+            end
+
+            video_frame.FourCC = 0x41524742  -- 'BGRA'
+            video_frame.line_stride_in_bytes = width * 4
+            video_frame.p_data = ptr
+
+            -- Optionally dump the real/captured frame to disk for debugging
+            if M.dump_frames and M.dump_frames > 0 then
+                -- Write the current canvas imageData to PNG before we free buffer
+                pcall(function()
+                    local dir = M.dump_dir or "."
+                    local file_path = string.format("%s\\ndi_dump_bgra_%d.png", dir, os.time())
+                    imageData:encode("png", file_path)
+                    print("NDI: dumped BGRA frame to " .. file_path)
+                end)
+                M.dump_frames = math.max(0, M.dump_frames - 1)
+            end
+            ndi_lib.NDIlib_send_send_video_v2(ndi_sender, video_frame)
+            ffi.C.free(test_buffer)
+
+            if love.timer.getTime() % 2 < 0.016 then
+                print(string.format("NDI frame sent: %dx%d at %.2f fps (BGRA) - %d connections", 
+                    width, height, love.timer.getFPS(), num_connections))
+                print(string.format("Frame data: ptr=%s, stride=%d, fourcc=0x%08X", 
+                    tostring(video_frame.p_data), video_frame.line_stride_in_bytes, video_frame.FourCC))
+            end
+        else
+            -- Default: UYVY (2 bytes per pixel)
+            local uyvy_size = width * height * 2
+            local test_buffer = ffi.C.malloc(uyvy_size)
+            if test_buffer == nil then
+                print("Failed to allocate UYVY test buffer")
+                return false
+            end
+            local ptr = ffi.cast("uint8_t*", test_buffer)
+            local frame_counter = math.floor(love.timer.getTime() * 2) % 2
+            local y_value = frame_counter == 0 and 235 or 16
+            local u_value = 128
+            local v_value = 128
+            for i = 0, uyvy_size - 1, 4 do
+                ptr[i] = u_value
+                ptr[i + 1] = y_value
+                ptr[i + 2] = v_value
+                ptr[i + 3] = y_value
+            end
+
+            video_frame.FourCC = 0x59565955  -- 'UYVY'
+            video_frame.line_stride_in_bytes = width * 2
+            video_frame.p_data = ptr
+
+            -- Optionally dump the UYVY frame as the captured PNG (from imageData)
+            if M.dump_frames and M.dump_frames > 0 then
+                pcall(function()
+                    local dir = M.dump_dir or "."
+                    local file_path = string.format("%s\\ndi_dump_uyvy_%d.png", dir, os.time())
+                    imageData:encode("png", file_path)
+                    print("NDI: dumped UYVY (captured canvas) to " .. file_path)
+                end)
+                M.dump_frames = math.max(0, M.dump_frames - 1)
+            end
+
+            ndi_lib.NDIlib_send_send_video_v2(ndi_sender, video_frame)
+            ffi.C.free(test_buffer)
+
+            if love.timer.getTime() % 2 < 0.016 then
+                print(string.format("NDI frame sent: %dx%d at %.2f fps (UYVY) - %d connections", 
+                    width, height, love.timer.getFPS(), num_connections))
+                print(string.format("Frame data: ptr=%s, stride=%d, fourcc=0x%08X", 
+                    tostring(video_frame.p_data), video_frame.line_stride_in_bytes, video_frame.FourCC))
+                print(string.format("UYVY test pattern: Y=%d, U=%d, V=%d", y_value, u_value, v_value))
+            end
         end
         
         return true
