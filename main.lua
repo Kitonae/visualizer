@@ -1,5 +1,53 @@
 -- main.lua
--- Love2D app to render shaders with Tab switching
+-- Love2D app to render shaders with Tab switching and NDI streaming
+
+-- Safely load NDI module
+local ndi = nil
+local ndi_load_success, ndi_load_error = pcall(function()
+    ndi = require("ndi")
+end)
+
+-- Load console module
+local console_load_success, console_load_error = pcall(function()
+    return require("console")
+end)
+
+local console
+if console_load_success then
+    console = console_load_error  -- pcall returns the result in the error parameter when successful
+else
+    print("Failed to load console module: " .. tostring(console_load_error))
+    -- Create dummy console module
+    console = {
+        init = function() end,
+        update = function() end,
+        draw = function() end,
+        keypressed = function() return false end,
+        textinput = function() end,
+        log = function() end,
+        info = function() end,
+        warn = function() end,
+        error = function() end,
+        success = function() end
+    }
+end
+
+if not ndi_load_success then
+    print("Failed to load NDI module: " .. tostring(ndi_load_error))
+    -- Create dummy NDI module
+    ndi = {
+        initialize = function() return false end,
+        is_streaming = function() return false end,
+        is_initialized = function() return false end,
+        get_mode = function() return "disabled" end,
+        setup_realtime_capture = function() return false end,
+        begin_capture = function() end,
+        end_capture_and_send = function() end,
+        start_streaming = function() return false end,
+        stop_streaming = function() end,
+        destroy = function() end
+    }
+end
 
 function love.load()
     -- List of available shaders
@@ -14,6 +62,25 @@ function love.load()
     
     -- Load forest background image
     backgroundImage = love.graphics.newImage("forest.png")
+    
+    -- NDI initialization
+    ndi_enabled = false
+    ndi_source_name = "viz"
+    ndi_groups = nil
+    
+    -- Try to initialize NDI
+    if ndi.initialize() then
+        print("NDI initialized successfully")
+        console.success("NDI initialized successfully")
+        ndi_enabled = true
+        ndi.setup_realtime_capture()
+    else
+        print("NDI initialization failed - streaming will be disabled")
+        console.warn("NDI initialization failed - streaming will be disabled")
+    end
+    
+    -- Initialize console
+    console.init()
     
     loadCurrentShader()
 end
@@ -71,40 +138,78 @@ function love.update(dt)
         shader:send("resolution", {love.graphics.getWidth(), love.graphics.getHeight()})
     end
     
+    -- Update console
+    console.update(dt)
 end
 
 
 function love.draw()
     local shaderInfo = shaders[currentShaderIndex]
     
-    -- Draw forest background if shader supports transparency
-    if shaderInfo.hasBackground then
-        love.graphics.setColor(1, 1, 1, 1)
-        love.graphics.draw(backgroundImage, 0, 0, 0, 
-                          love.graphics.getWidth() / backgroundImage:getWidth(), 
-                          love.graphics.getHeight() / backgroundImage:getHeight())
+    -- Function to render the main content
+    local function renderContent()
+        -- Draw forest background if shader supports transparency
+        if shaderInfo.hasBackground then
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.draw(backgroundImage, 0, 0, 0, 
+                              love.graphics.getWidth() / backgroundImage:getWidth(), 
+                              love.graphics.getHeight() / backgroundImage:getHeight())
+        end
+        
+        -- Draw shader
+        love.graphics.setShader(shader)
+        love.graphics.rectangle("fill", 0, 0, love.graphics.getWidth(), love.graphics.getHeight())
+        love.graphics.setShader()
     end
     
-    -- Draw shader
-    love.graphics.setShader(shader)
-    love.graphics.rectangle("fill", 0, 0, love.graphics.getWidth(), love.graphics.getHeight())
-    love.graphics.setShader()
+    -- Render to screen
+    renderContent()
+    
+    -- Render to NDI canvas if streaming
+    if ndi_enabled and ndi.is_streaming() then
+        ndi.begin_capture()
+        renderContent()
+        ndi.end_capture_and_send()
+    end
 
-    -- Draw shader switcher UI
+    -- Draw UI (only on screen, not in NDI stream)
     love.graphics.setColor(1, 1, 1, 0.8)
     love.graphics.print("Current: " .. shaderInfo.name, 10, 10)
-    love.graphics.print("Press [Tab] to switch shaders, [Q] to quit", 10, 30)
+    love.graphics.print("Press [Tab] to switch shaders, [Q] to quit, [`] for console", 10, 30)
+    
+    -- NDI status
+    if ndi_enabled then
+        local ndi_status = ndi.is_streaming() and "STREAMING" or "READY"
+        local ndi_mode = ndi.get_mode()
+        love.graphics.print("NDI: " .. ndi_status .. " (" .. ndi_mode .. ") - Press [N] to toggle", 10, 50)
+        love.graphics.print("Source: " .. ndi_source_name, 10, 70)
+    else
+        love.graphics.print("NDI: DISABLED", 10, 50)
+    end
     
     -- Show available shaders
     for i, s in ipairs(shaders) do
         local prefix = (i == currentShaderIndex) and "> " or "  "
-        love.graphics.print(prefix .. i .. ". " .. s.name, 10, 50 + i * 20)
+        love.graphics.print(prefix .. i .. ". " .. s.name, 10, 90 + i * 20)
     end
+    
+    -- Draw console last (on top)
+    console.draw()
 end
 
 
 function love.keypressed(key)
+    -- Let console handle key first
+    if console and console.keypressed(key) then
+        return  -- Console consumed the key
+    end
+    
     if key == "q" then 
+        -- Cleanup console and NDI before quitting
+        console.cleanup()
+        if ndi_enabled then
+            ndi.cleanup()  -- Use the proper cleanup function
+        end
         love.event.quit() 
     end
     if key == "tab" then
@@ -113,11 +218,33 @@ function love.keypressed(key)
             currentShaderIndex = 1
         end
         loadCurrentShader()
+        console.info("Switched to shader: " .. shaders[currentShaderIndex].name)
+    end
+    if key == "n" and ndi_enabled then
+        -- Toggle NDI streaming
+        if ndi.is_streaming() then
+            ndi.stop_streaming()
+            print("NDI streaming stopped")
+            console.info("NDI streaming stopped")
+        else
+            if ndi.start_streaming(ndi_source_name, ndi_groups) then
+                print("NDI streaming started: " .. ndi_source_name)
+                console.success("NDI streaming started: " .. ndi_source_name)
+            else
+                print("Failed to start NDI streaming")
+                console.error("Failed to start NDI streaming")
+            end
+        end
     end
     -- Number keys for direct shader selection
     local num = tonumber(key)
     if num and num >= 1 and num <= #shaders then
         currentShaderIndex = num
         loadCurrentShader()
+        console.info("Switched to shader: " .. shaders[currentShaderIndex].name)
     end
+end
+
+function love.textinput(text)
+    console.textinput(text)
 end
