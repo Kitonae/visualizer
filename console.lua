@@ -191,7 +191,7 @@ local function execute_command(cmd)
         M.log("Available commands:")
         M.log("  help - Show this help")
         M.log("  clear - Clear console")
-        M.log("  ndi - NDI commands (status, start, stop, info, debug)")
+        M.log("  ndi - NDI commands (status, start, stop, info, debug, send)")
         M.log("  shader - Shader commands (list, switch <num>)")
         M.log("  fps - Show current FPS")
         M.log("  version - Show version info")
@@ -242,6 +242,16 @@ local function execute_command(cmd)
                 M.success(string.format("NDI: dumping %d frames to %s", n, dir ~= "" and dir or "."))
             else
                 M.error("NDI dump not available")
+            end
+        elseif args[1] == "test" then
+            -- Run SDK-style test implementation
+            local ndi_test = require("ndi_test")
+            M.log("Running NDI SDK test implementation...")
+            local success = ndi_test.run_test()
+            if success then
+                M.success("NDI SDK test completed")
+            else
+                M.error("NDI SDK test failed")
             end
         end
     elseif command == "shader" then

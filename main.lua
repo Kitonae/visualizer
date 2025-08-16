@@ -50,6 +50,8 @@ if not ndi_load_success then
 end
 
 function love.load()
+    print("Starting LÖVE application...")
+    
     -- List of available shaders
     shaders = {
         {name = "Kaleidoscope", file = "shaders/kaleidoscope.frag", hasBackground = false},
@@ -60,8 +62,28 @@ function love.load()
     
     currentShaderIndex = 4 -- Start with mono lines
     
+    -- Initialize console first so we can log errors
+    local console_success, console_error = pcall(function()
+        console.init()
+    end)
+    
+    if not console_success then
+        print("Console initialization failed: " .. tostring(console_error))
+    else
+        print("Console initialized successfully")
+    end
+    
     -- Load forest background image
-    backgroundImage = love.graphics.newImage("forest.png")
+    local bg_success, bg_error = pcall(function()
+        backgroundImage = love.graphics.newImage("forest.png")
+    end)
+    
+    if not bg_success then
+        print("Failed to load background image: " .. tostring(bg_error))
+        console.error("Failed to load background image: " .. tostring(bg_error))
+    else
+        print("Background image loaded successfully")
+    end
     
     -- NDI initialization
     ndi_enabled = false
@@ -69,20 +91,30 @@ function love.load()
     ndi_groups = nil
     
     -- Try to initialize NDI
-    if ndi.initialize() then
+    local ndi_success, ndi_error = pcall(function()
+        return ndi.initialize()
+    end)
+    
+    if ndi_success and ndi_error then -- ndi_error is actually the return value when pcall succeeds
         print("NDI initialized successfully")
         console.success("NDI initialized successfully")
         ndi_enabled = true
-        ndi.setup_realtime_capture()
     else
-        print("NDI initialization failed - streaming will be disabled")
-        console.warn("NDI initialization failed - streaming will be disabled")
+        local error_msg = ndi_success and "NDI initialization returned false" or tostring(ndi_error)
+        print("NDI initialization failed - streaming will be disabled: " .. error_msg)
+        console.warn("NDI initialization failed - streaming will be disabled: " .. error_msg)
     end
     
-    -- Initialize console
-    console.init()
+    -- Load shader
+    local shader_success, shader_error = pcall(loadCurrentShader)
+    if not shader_success then
+        print("Failed to load shader: " .. tostring(shader_error))
+        console.error("Failed to load shader: " .. tostring(shader_error))
+    else
+        print("Shader loaded successfully")
+    end
     
-    loadCurrentShader()
+    print("LÖVE application startup complete")
 end
 
 function loadCurrentShader()
@@ -165,11 +197,22 @@ function love.draw()
     -- Render to screen
     renderContent()
     
-    -- Render to NDI canvas if streaming
+    -- Send frame via NDI if streaming
     if ndi_enabled and ndi.is_streaming() then
-        ndi.begin_capture()
+        -- Create a canvas for NDI capture
+        if not _G.ndi_capture_canvas then
+            local w, h = love.graphics.getWidth(), love.graphics.getHeight()
+            _G.ndi_capture_canvas = love.graphics.newCanvas(w, h)
+        end
+        
+        -- Render to NDI canvas
+        love.graphics.setCanvas(_G.ndi_capture_canvas)
+        love.graphics.clear()
         renderContent()
-        ndi.end_capture_and_send()
+        love.graphics.setCanvas()
+        
+        -- Send frame via shared memory to C++ NDI sender
+        ndi.send_frame(_G.ndi_capture_canvas)
     end
 
     -- Draw UI (only on screen, not in NDI stream)
@@ -208,7 +251,7 @@ function love.keypressed(key)
         -- Cleanup console and NDI before quitting
         console.cleanup()
         if ndi_enabled then
-            ndi.cleanup()  -- Use the proper cleanup function
+            ndi.cleanup()  -- This will now stop the managed subprocess
         end
         love.event.quit() 
     end

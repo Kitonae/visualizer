@@ -1,8 +1,0 @@
-.\\NDIAnalysis.exe /source:"viz" /framecheck
-NDI Analysis v6.2.0.3
-Copyright (C) 2023-2025 Vizrt NDI AB. All rights reserved.
-
-NDI version : 6.2.0.3
-
-00:19:34.729: Video receiver creation succeeded.
-00:19:34.729: Audio receiver creation succeeded.
