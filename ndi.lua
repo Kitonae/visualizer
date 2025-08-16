@@ -148,7 +148,7 @@ local perf_counters = {
 
 local SHARED_MEMORY_NAME = "LOVE_NDI_SHARED_FRAME"
 local MAGIC_NUMBER = 0xDEADBEEF
-local NDI_SENDER_PATH = "build/ndi_sender.exe"
+local NDI_SENDER_PATH = "ndi_sender.exe"
 
 function M.init_performance_counters()
     if perf_counters.initialized then

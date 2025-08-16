@@ -1,0 +1,122 @@
+# LÖVE2D Visualizer .gitignore
+
+# Build outputs and distribution
+dist/
+build/
+*.love
+*.exe
+temp_build/
+visualizer_v*_win64/
+visualizer_v*_win64.zip
+
+# Compiled NDI components
+*.obj
+*.o
+ndi_sender.exe
+
+# NDI SDK libraries (these should be downloaded/redistributed, not committed)
+# Note: These are large binary files that should be obtained from NDI SDK
+Processing.NDI.Lib.Runtime.x64.dll
+Processing.NDI.Lib.x64.dll
+*.dll
+*.so
+*.dylib
+
+# Visual Studio / C++ build artifacts
+*.vcxproj.user
+*.sdf
+*.opensdf
+*.suo
+*.user
+Debug/
+Release/
+x64/
+x86/
+.vs/
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Backup files
+*_backup.*
+*_corrupted.*
+*.bak
+*.orig
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Log files
+*.log
+*.txt.log
+logs/
+
+# Downloaded dependencies
+love.exe
+love.zip
+love_temp/
+
+# Configuration files that might contain sensitive data
+config.local.*
+secrets.*
+.env
+.env.local
+
+# Package manager files (if using)
+node_modules/
+package-lock.json
+yarn.lock
+
+# Lua compiled bytecode
+luac.out
+
+# Love2D cache files
+.love/
+
+# NDI specific
+ndi_test_output/
+*.ndi
+
+# Git specific
+.gitattributes
+
+# Archive files
+*.zip
+*.tar
+*.gz
+*.7z
+*.rar
+
+# Documentation build
+docs/_build/
+*.pdf
+
+# Test files
+test_*.lua
+*_test.lua
+
+# Performance profiling
+*.prof
