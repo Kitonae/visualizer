@@ -199,10 +199,21 @@ function love.draw()
     
     -- Send frame via NDI if streaming
     if ndi_enabled and ndi.is_streaming() then
-        -- Create a canvas for NDI capture
-        if not _G.ndi_capture_canvas then
-            local w, h = love.graphics.getWidth(), love.graphics.getHeight()
+        local w, h = love.graphics.getWidth(), love.graphics.getHeight()
+        
+        -- Create or recreate NDI canvas if size changed
+        if not _G.ndi_capture_canvas or 
+           _G.ndi_capture_canvas:getWidth() ~= w or 
+           _G.ndi_capture_canvas:getHeight() ~= h then
+            
+            -- Release old canvas if it exists
+            if _G.ndi_capture_canvas then
+                _G.ndi_capture_canvas:release()
+            end
+            
+            -- Create new canvas with current window size
             _G.ndi_capture_canvas = love.graphics.newCanvas(w, h)
+            print("NDI canvas recreated for resolution: " .. w .. "x" .. h)
         end
         
         -- Render to NDI canvas
@@ -290,4 +301,21 @@ end
 
 function love.textinput(text)
     console.textinput(text)
+end
+
+function love.keyreleased(key)
+    -- Let console handle key release
+    if console and console.keyreleased then
+        console.keyreleased(key)
+    end
+end
+
+function love.resize(w, h)
+    -- Update shader resolution uniform
+    if shader and shader:hasUniform("resolution") then
+        shader:send("resolution", {w, h})
+    end
+    
+    -- NDI canvas will be automatically recreated on next frame
+    print("Window resized to " .. w .. "x" .. h .. " - NDI will adjust automatically")
 end

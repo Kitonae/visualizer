@@ -92,11 +92,41 @@ local SHARED_MEMORY_NAME = "LOVE_NDI_SHARED_FRAME"
 local MAGIC_NUMBER = 0xDEADBEEF
 local NDI_SENDER_PATH = "build/ndi_sender.exe"
 
+function M.kill_existing_ndi_processes()
+    local success, result = pcall(function()
+        print("Checking for existing ndi_sender.exe processes...")
+        
+        -- Use PowerShell to kill any existing ndi_sender processes
+        local command = 'powershell -Command "Get-Process -Name ndi_sender -ErrorAction SilentlyContinue | Stop-Process -Force"'
+        local handle = io.popen(command)
+        if handle then
+            local output = handle:read("*a")
+            handle:close()
+            if output and output ~= "" then
+                print("Killed existing ndi_sender processes")
+            else
+                print("No existing ndi_sender processes found")
+            end
+        end
+        
+        -- Small delay to ensure processes are fully terminated
+        love.timer.sleep(0.1)
+        return true
+    end)
+    
+    if not success then
+        print("Warning: Failed to check/kill existing NDI processes: " .. tostring(result))
+    end
+end
+
 function M.start_ndi_process()
     if ndi_process then
         print("NDI process already running")
         return true
     end
+    
+    -- Kill any existing ndi_sender.exe processes before starting
+    M.kill_existing_ndi_processes()
     
     local success, result = pcall(function()
         -- Check if NDI sender executable exists
@@ -238,7 +268,7 @@ function M.initialize()
                 nil,
                 PAGE_READWRITE,
                 0,
-                8 * 1024 * 1024, -- 8MB for large frames
+                64 * 1024 * 1024, -- 64MB for 4K+ frames
                 SHARED_MEMORY_NAME
             )
             
@@ -263,7 +293,7 @@ function M.initialize()
             FILE_MAP_ALL_ACCESS,
             0,
             0,
-            8 * 1024 * 1024 -- 8MB
+            64 * 1024 * 1024 -- 64MB
         ))
         
         if shared_data == nil or shared_data == ffi.cast("uint8_t*", 0) then
@@ -317,9 +347,9 @@ function M.send_frame(capture_canvas)
         end
         
         local data_size = width * height * 4 -- RGBA
-        local max_data_size = 8 * 1024 * 1024 - ffi.offsetof("SharedFrameData", "pixel_data")
+        local max_data_size = 64 * 1024 * 1024 - ffi.offsetof("SharedFrameData", "pixel_data")
         if data_size > max_data_size then
-            print("Frame too large for shared memory buffer: " .. data_size)
+            print("Frame too large for shared memory buffer: " .. data_size .. " (max: " .. max_data_size .. ")")
             return false
         end
         
@@ -362,6 +392,9 @@ end
 function M.cleanup()
     -- Stop the NDI process first
     M.stop_ndi_process()
+    
+    -- Force kill any remaining ndi_sender processes as backup
+    M.kill_existing_ndi_processes()
     
     if shared_data and shared_data ~= ffi.cast("SharedFrameData*", 0) then
         ffi.C.UnmapViewOfFile(shared_data)

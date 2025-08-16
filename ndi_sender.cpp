@@ -67,7 +67,7 @@ public:
             nullptr,
             PAGE_READWRITE,
             0,
-            8 * 1024 * 1024, // 8MB for large frames
+            64 * 1024 * 1024, // 64MB for 4K+ frames
             SHARED_MEMORY_NAME
         );
         
@@ -81,7 +81,7 @@ public:
             FILE_MAP_ALL_ACCESS,
             0,
             0,
-            8 * 1024 * 1024 // 8MB
+            64 * 1024 * 1024 // 64MB
         ));
         
         if (!shared_data) {

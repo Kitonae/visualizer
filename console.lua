@@ -195,6 +195,7 @@ local function execute_command(cmd)
         M.log("  shader - Shader commands (list, switch <num>)")
         M.log("  fps - Show current FPS")
         M.log("  version - Show version info")
+        M.log("  resolution - Resolution commands (get, set <width> <height>)")
         M.log("  quit - Quit application")
         
     elseif command == "clear" then
@@ -278,6 +279,53 @@ local function execute_command(cmd)
     elseif command == "version" then
         local major, minor, revision, codename = love.getVersion()
         M.log("LÖVE Version: " .. major .. "." .. minor .. "." .. revision .. " (" .. codename .. ")")
+        
+    elseif command == "resolution" then
+        if #args == 0 or args[1] == "get" then
+            local width = love.graphics.getWidth()
+            local height = love.graphics.getHeight()
+            M.log("Current resolution: " .. width .. "x" .. height)
+        elseif args[1] == "set" and args[2] and args[3] then
+            local width = tonumber(args[2])
+            local height = tonumber(args[3])
+            
+            if width and height and width > 0 and height > 0 then
+                -- Validate reasonable resolution limits
+                if width < 100 or height < 100 then
+                    M.error("Resolution too small. Minimum: 100x100")
+                elseif width > 7680 or height > 4320 then
+                    M.error("Resolution too large. Maximum: 7680x4320")
+                else
+                    -- Set window size
+                    local success = pcall(function()
+                        love.window.setMode(width, height)
+                    end)
+                    
+                    if success then
+                        M.success("Resolution changed to " .. width .. "x" .. height)
+                        
+                        -- Update shader resolution uniform if shader exists
+                        if _G.shader and _G.shader.hasUniform and _G.shader:hasUniform("resolution") then
+                            _G.shader:send("resolution", {width, height})
+                        end
+                        
+                        -- NDI canvas will automatically adjust to new resolution on next frame
+                        M.log("NDI canvas will adjust to new resolution automatically")
+                    else
+                        M.error("Failed to set resolution to " .. width .. "x" .. height)
+                    end
+                end
+            else
+                M.error("Invalid resolution values. Use: resolution set <width> <height>")
+            end
+        else
+            M.log("Usage: resolution [get] or resolution set <width> <height>")
+            M.log("Examples:")
+            M.log("  resolution - Show current resolution")
+            M.log("  resolution get - Show current resolution")
+            M.log("  resolution set 1920 1080 - Set to 1920x1080")
+            M.log("  resolution set 800 600 - Set to 800x600")
+        end
         
     elseif command == "quit" or command == "exit" then
         M.log("Quitting application...")
