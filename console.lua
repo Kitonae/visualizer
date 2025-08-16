@@ -542,6 +542,11 @@ function M.textinput(text)
         return
     end
     
+    -- Ignore backtick character (used for console toggle)
+    if text == "`" then
+        return
+    end
+    
     -- Insert text at cursor position
     local before = console.input_text:sub(1, console.cursor_pos)
     local after = console.input_text:sub(console.cursor_pos + 1)
