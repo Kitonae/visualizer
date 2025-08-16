@@ -15,6 +15,27 @@ ffi.cdef[[
     int CloseHandle(void* hObject);
     uint32_t GetLastError();
     
+    // Performance Counters API
+    typedef void* PDH_HQUERY;
+    typedef void* PDH_HCOUNTER;
+    
+    typedef struct {
+        uint32_t    CStatus;
+        union {
+            int32_t     longValue;
+            double      doubleValue;
+            int64_t     largeValue;
+            char*       AnsiStringValue;
+            wchar_t*    WideStringValue;
+        };
+    } PDH_FMT_COUNTERVALUE;
+    
+    uint32_t PdhOpenQueryA(const char* szDataSource, uint32_t dwUserData, PDH_HQUERY* phQuery);
+    uint32_t PdhAddCounterA(PDH_HQUERY hQuery, const char* szFullCounterPath, uint32_t dwUserData, PDH_HCOUNTER* phCounter);
+    uint32_t PdhCollectQueryData(PDH_HQUERY hQuery);
+    uint32_t PdhGetFormattedCounterValue(PDH_HCOUNTER hCounter, uint32_t dwFormat, uint32_t* lpdwType, PDH_FMT_COUNTERVALUE* pValue);
+    uint32_t PdhCloseQuery(PDH_HQUERY hQuery);
+    
     // Process management
     typedef struct {
         uint32_t cb;
@@ -65,6 +86,13 @@ local CREATE_NO_WINDOW = 0x08000000
 local STILL_ACTIVE = 259
 local WAIT_TIMEOUT = 258
 
+-- PDH (Performance Data Helper) constants
+local PDH_FMT_LARGE = 0x00000400
+local PDH_CSTATUS_VALID_DATA = 0x00000000
+
+-- Load PDH library
+local pdh = ffi.load("pdh")
+
 -- Shared frame data structure (must match C++)
 ffi.cdef[[
     typedef struct {
@@ -75,6 +103,7 @@ ffi.cdef[[
         uint32_t frame_number;
         uint64_t timestamp_us;    // Microseconds since start
         uint32_t data_size;
+        uint32_t receiver_count;  // Number of connected NDI receivers
         uint8_t pixel_data[1];    // Variable length array (we'll handle size separately)
     } SharedFrameData;
 ]]
@@ -87,10 +116,189 @@ local frame_counter = 0
 local start_time = nil
 local ndi_process = nil
 local process_info = nil
+local debug_output = false -- Debug output disabled by default
+
+-- Network statistics
+local network_stats = {
+    bytes_sent = 0,
+    frames_sent = 0,
+    last_frame_time = 0,
+    fps_counter = 0,
+    fps_time = 0,
+    current_fps = 0,
+    bandwidth_history = {}, -- Last 60 samples for graph (real network interface stats)
+    max_bandwidth = 0,
+    avg_bandwidth = 0
+}
+
+-- Network interface monitoring
+local network_interface_stats = {
+    last_bytes_sent = 0,
+    last_check_time = 0,
+    interface_name = nil,
+    use_fallback = false
+}
+
+-- Performance counters
+local perf_counters = {
+    query = nil,
+    counter = nil,
+    initialized = false
+}
 
 local SHARED_MEMORY_NAME = "LOVE_NDI_SHARED_FRAME"
 local MAGIC_NUMBER = 0xDEADBEEF
 local NDI_SENDER_PATH = "build/ndi_sender.exe"
+
+function M.init_performance_counters()
+    if perf_counters.initialized then
+        return true
+    end
+    
+    local success, result = pcall(function()
+        -- Create a new query
+        local query = ffi.new("PDH_HQUERY[1]")
+        local status = pdh.PdhOpenQueryA(nil, 0, query)
+        if status ~= 0 then
+            error("Failed to open PDH query: " .. status)
+        end
+        perf_counters.query = query[0]
+        
+        -- Try different counter paths in order of preference
+        local counter_paths = {
+            "\\Network Interface(_Total)\\Bytes Sent/sec",
+            "\\Network Interface(*)\\Bytes Sent/sec",
+            "\\Network Interface\\Bytes Sent/sec"
+        }
+        
+        local counter = ffi.new("PDH_HCOUNTER[1]")
+        local success_path = nil
+        
+        for _, counter_path in ipairs(counter_paths) do
+            local status = pdh.PdhAddCounterA(perf_counters.query, counter_path, 0, counter)
+            if status == 0 then
+                success_path = counter_path
+                break
+            end
+        end
+        
+        if not success_path then
+            error("All counter paths failed")
+        end
+        
+        perf_counters.counter = counter[0]
+        
+        -- Collect initial data multiple times to ensure it's working
+        for i = 1, 3 do
+            pdh.PdhCollectQueryData(perf_counters.query)
+            love.timer.sleep(0.1)
+        end
+        
+        perf_counters.initialized = true
+        return true
+    end)
+    
+    if not success then
+        return false
+    end
+    
+    return result
+end
+
+-- Fallback to simpler network monitoring if performance counters fail
+function M.fallback_to_simple_monitoring()
+    perf_counters.initialized = false
+    network_interface_stats.use_fallback = true
+end
+
+function M.get_network_interface_bytes()
+    -- If performance counters failed, use fallback method
+    if network_interface_stats.use_fallback then
+        -- Return a reasonable estimate based on NDI frame data
+        if network_stats.current_fps > 0 and network_stats.last_frame_time > 0 then
+            -- Estimate network usage based on NDI frames being sent
+            -- Assume some overhead and compression for actual network traffic
+            local estimated_bandwidth = (network_stats.bytes_sent / (love.timer.getTime() - (start_time or 0))) * 0.8 -- 80% efficiency estimate
+            return estimated_bandwidth
+        end
+        return 0
+    end
+    
+    if not perf_counters.initialized then
+        if not M.init_performance_counters() then
+            M.fallback_to_simple_monitoring()
+            return M.get_network_interface_bytes() -- Retry with fallback
+        end
+    end
+    
+    local success, result = pcall(function()
+        -- Collect current data
+        local status = pdh.PdhCollectQueryData(perf_counters.query)
+        if status ~= 0 then
+            M.fallback_to_simple_monitoring()
+            return 0
+        end
+        
+        -- Get the formatted counter value
+        local counter_value = ffi.new("PDH_FMT_COUNTERVALUE")
+        local counter_type = ffi.new("uint32_t[1]")
+        
+        status = pdh.PdhGetFormattedCounterValue(perf_counters.counter, PDH_FMT_LARGE, counter_type, counter_value)
+        if status == PDH_CSTATUS_VALID_DATA then
+            return tonumber(counter_value.largeValue)
+        else
+            M.fallback_to_simple_monitoring()
+        end
+        
+        return 0
+    end)
+    
+    if not success then
+        M.fallback_to_simple_monitoring()
+        return 0
+    end
+    
+    return result
+end
+
+function M.cleanup_performance_counters()
+    if perf_counters.query then
+        pdh.PdhCloseQuery(perf_counters.query)
+        perf_counters.query = nil
+    end
+    perf_counters.counter = nil
+    perf_counters.initialized = false
+end
+
+function M.update_network_interface_stats()
+    local current_time = love.timer.getTime()
+    
+    -- Update network interface stats every second
+    if current_time - network_interface_stats.last_check_time >= 1.0 then
+        -- Get current network bytes per second (this is already a rate from performance counters)
+        local bandwidth = M.get_network_interface_bytes() -- bytes per second
+        
+        -- Always add data to history, even if zero, to keep the graph updating
+        table.insert(network_stats.bandwidth_history, bandwidth)
+        if #network_stats.bandwidth_history > 60 then
+            table.remove(network_stats.bandwidth_history, 1)
+        end
+        
+        -- Update max bandwidth if we have a positive value
+        if bandwidth > 0 and bandwidth > network_stats.max_bandwidth then
+            network_stats.max_bandwidth = bandwidth
+        end
+        
+        -- Always calculate average from existing history
+        local sum = 0
+        for _, bw in ipairs(network_stats.bandwidth_history) do
+            sum = sum + bw
+        end
+        network_stats.avg_bandwidth = #network_stats.bandwidth_history > 0 and (sum / #network_stats.bandwidth_history) or 0
+        
+        network_interface_stats.last_check_time = current_time
+    end
+end
 
 function M.kill_existing_ndi_processes()
     local success, result = pcall(function()
@@ -372,8 +580,24 @@ function M.send_frame(capture_canvas)
         local pixel_data_ptr = shared_data + ffi.offsetof("SharedFrameData", "pixel_data")
         ffi.copy(pixel_data_ptr, pixels, math.min(data_size, #pixels))
         
-        -- Debug output
-        if frame_counter % 60 == 0 then
+        -- Update network statistics
+        network_stats.bytes_sent = network_stats.bytes_sent + data_size
+        network_stats.frames_sent = network_stats.frames_sent + 1
+        network_stats.last_frame_time = current_time
+        
+        -- Calculate FPS
+        network_stats.fps_counter = network_stats.fps_counter + 1
+        if current_time - network_stats.fps_time >= 1.0 then
+            network_stats.current_fps = network_stats.fps_counter
+            network_stats.fps_counter = 0
+            network_stats.fps_time = current_time
+        end
+        
+        -- Update real network interface statistics
+        M.update_network_interface_stats()
+        
+        -- Debug output (only if enabled)
+        if debug_output and frame_counter % 60 == 0 then
             print(string.format("NDI: Sent frame %d (%dx%d) timestamp: %d", 
                 frame_counter, width, height, timestamp_us))
         end
@@ -396,6 +620,9 @@ function M.cleanup()
     -- Force kill any remaining ndi_sender processes as backup
     M.kill_existing_ndi_processes()
     
+    -- Cleanup performance counters
+    M.cleanup_performance_counters()
+    
     if shared_data and shared_data ~= ffi.cast("SharedFrameData*", 0) then
         ffi.C.UnmapViewOfFile(shared_data)
         shared_data = nil
@@ -405,6 +632,23 @@ function M.cleanup()
         ffi.C.CloseHandle(shared_memory)
         shared_memory = nil
     end
+    
+    -- Reset network statistics
+    network_stats.bytes_sent = 0
+    network_stats.frames_sent = 0
+    network_stats.last_frame_time = 0
+    network_stats.fps_counter = 0
+    network_stats.fps_time = 0
+    network_stats.current_fps = 0
+    network_stats.bandwidth_history = {}
+    network_stats.max_bandwidth = 0
+    network_stats.avg_bandwidth = 0
+    
+    -- Reset network interface stats
+    network_interface_stats.last_bytes_sent = 0
+    network_interface_stats.last_check_time = 0
+    network_interface_stats.interface_name = nil
+    network_interface_stats.use_fallback = false
     
     is_initialized = false
     print("NDI: Cleaned up shared memory and stopped process")
@@ -424,8 +668,12 @@ function M.is_streaming()
 end
 
 function M.start_streaming(source_name)
-    source_name = source_name or "LÖVE NDI Stream"
+    source_name = source_name or "LÖVE Visualizer"
     if M.initialize() then
+        -- Initialize performance counters for real-time network monitoring
+        M.init_performance_counters()
+        network_interface_stats.last_check_time = love.timer.getTime()
+        
         print("NDI streaming started: " .. source_name)
         return true
     end
@@ -463,6 +711,57 @@ function M.get_status()
     return string.format("Ready (magic: %s, frames: %d, PID: %d)", 
         magic_ok and "OK" or "INVALID", frame_counter, 
         process_info and process_info.dwProcessId or 0)
+end
+
+function M.get_receiver_count()
+    if not is_initialized or not shared_data then
+        return 0
+    end
+    
+    local success, result = pcall(function()
+        local header = ffi.cast("SharedFrameData*", shared_data)
+        return header.receiver_count
+    end)
+    
+    if not success then
+        return 0
+    end
+    
+    return result
+end
+
+function M.get_network_stats()
+    return {
+        frames_sent = network_stats.frames_sent,
+        bytes_sent = network_stats.bytes_sent,
+        current_fps = network_stats.current_fps,
+        bandwidth_mbps = network_stats.avg_bandwidth / (1024 * 1024),
+        max_bandwidth_mbps = network_stats.max_bandwidth / (1024 * 1024),
+        bandwidth_history = network_stats.bandwidth_history,
+        uptime = start_time and (love.timer.getTime() - start_time) or 0,
+        receiver_count = M.get_receiver_count()
+    }
+end
+
+function M.set_debug_output(enabled)
+    debug_output = enabled
+    return debug_output
+end
+
+function M.get_debug_output()
+    return debug_output
+end
+
+function M.format_bytes(bytes)
+    if bytes < 1024 then
+        return string.format("%.0f B", bytes)
+    elseif bytes < 1024 * 1024 then
+        return string.format("%.1f KB", bytes / 1024)
+    elseif bytes < 1024 * 1024 * 1024 then
+        return string.format("%.1f MB", bytes / (1024 * 1024))
+    else
+        return string.format("%.2f GB", bytes / (1024 * 1024 * 1024))
+    end
 end
 
 -- Cleanup on module unload

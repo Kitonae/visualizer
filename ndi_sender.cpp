@@ -35,6 +35,7 @@ struct SharedFrameData {
     uint32_t frame_number;
     uint64_t timestamp_us;    // Microseconds since start
     uint32_t data_size;
+    uint32_t receiver_count;  // Number of connected NDI receivers
     uint8_t pixel_data[1920 * 1080 * 4]; // Max size for RGBA at 1080p
 };
 
@@ -92,6 +93,7 @@ public:
         // Initialize shared data
         memset(shared_data, 0, sizeof(SharedFrameData));
         shared_data->magic = MAGIC_NUMBER;
+        shared_data->receiver_count = 0;
         
         std::cout << "Shared memory created successfully at: " << SHARED_MEMORY_NAME << std::endl;
         return true;
@@ -158,6 +160,8 @@ public:
             
             // Check for connections
             int connections = NDIlib_send_get_no_connections(ndi_sender, 0);
+            shared_data->receiver_count = connections; // Update receiver count in shared memory
+            
             if (connections == 0) {
                 last_frame_number = shared_data->frame_number;
                 std::this_thread::sleep_for(std::chrono::milliseconds(16));
@@ -285,7 +289,7 @@ int main() {
         return 1;
     }
     
-    if (!sender.create_sender("LÖVE NDI Stream")) {
+    if (!sender.create_sender("LÖVE Visualizer")) {
         std::cerr << "Failed to create NDI sender" << std::endl;
         return 1;
     }

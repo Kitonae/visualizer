@@ -87,7 +87,7 @@ function love.load()
     
     -- NDI initialization
     ndi_enabled = false
-    ndi_source_name = "viz"
+    ndi_source_name = "LÖVE Visualizer"
     ndi_groups = nil
     
     -- Try to initialize NDI
@@ -227,21 +227,91 @@ function love.draw()
     end
 
     -- Draw UI (only on screen, not in NDI stream)
-    love.graphics.setColor(1, 1, 1, 0.8)
+    love.graphics.setColor(0.5, 1, 0.8, 0.8)  -- Mint green color
     love.graphics.print("Current: " .. shaderInfo.name, 10, 10)
+    love.graphics.setColor(1, 1, 1, 0.8)  -- Reset to white for other text
     love.graphics.print("Press [Tab] to switch shaders, [Q] to quit, [`] for console", 10, 30)
     
-    -- NDI status
+    -- NDI status (basic info on left)
     if ndi_enabled then
         local ndi_status = ndi.is_streaming() and "STREAMING" or "READY"
         local ndi_mode = ndi.get_mode()
+        love.graphics.setColor(1, 1, 1, 0.8)
         love.graphics.print("NDI: " .. ndi_status .. " (" .. ndi_mode .. ") - Press [N] to toggle", 10, 50)
         love.graphics.print("Source: " .. ndi_source_name, 10, 70)
+        
+        -- Show detailed telemetry on the right side if streaming
+        if ndi.is_streaming() then
+            local stats = ndi.get_network_stats()
+            local screen_width = love.graphics.getWidth()
+            local telemetry_x = screen_width - 360  -- 320px from right edge
+            
+            -- Network statistics text (right-aligned)
+            love.graphics.setColor(1, 1, 1, 0.8)
+            love.graphics.print(string.format("Frames: %d | FPS: %d | Receivers: %d", 
+                stats.frames_sent, stats.current_fps, stats.receiver_count), telemetry_x, 10)
+            love.graphics.print(string.format("Data: %s", 
+                ndi.format_bytes(stats.bytes_sent)), telemetry_x, 30)
+            love.graphics.print(string.format("Bandwidth: %.1f MB/s", 
+                stats.bandwidth_mbps), telemetry_x, 50)
+            love.graphics.print(string.format("Peak: %.1f MB/s | Uptime: %.0fs", 
+                stats.max_bandwidth_mbps, stats.uptime), telemetry_x, 70)
+            
+            -- Draw network load graph (right side)
+            if #stats.bandwidth_history > 1 then
+                local graph_x = telemetry_x
+                local graph_y = 110
+                local graph_width = 300
+                local graph_height = 60
+                
+                -- Graph background
+                love.graphics.setColor(0, 0, 0, 0.7)
+                love.graphics.rectangle("fill", graph_x, graph_y, graph_width, graph_height)
+                
+                -- Graph border
+                love.graphics.setColor(1, 1, 1, 0.5)
+                love.graphics.rectangle("line", graph_x, graph_y, graph_width, graph_height)
+                
+                -- Graph title
+                love.graphics.setColor(1, 1, 1, 0.8)
+                love.graphics.print("Network Load (MB/s)", graph_x + 5, graph_y - 15)
+                
+                -- Draw graph lines
+                local max_value = math.max(stats.max_bandwidth_mbps, 1) -- Avoid division by zero
+                love.graphics.setColor(0, 1, 0, 0.8)
+                
+                for i = 2, #stats.bandwidth_history do
+                    local x1 = graph_x + ((i - 2) / (#stats.bandwidth_history - 1)) * graph_width
+                    local x2 = graph_x + ((i - 1) / (#stats.bandwidth_history - 1)) * graph_width
+                    
+                    local y1 = graph_y + graph_height - ((stats.bandwidth_history[i - 1] / (1024 * 1024)) / max_value) * graph_height
+                    local y2 = graph_y + graph_height - ((stats.bandwidth_history[i] / (1024 * 1024)) / max_value) * graph_height
+                    
+                    love.graphics.line(x1, y1, x2, y2)
+                end
+                
+                -- Draw max line reference
+                love.graphics.setColor(1, 1, 1, 0.5)
+                local max_y = graph_y + 10
+                love.graphics.line(graph_x, max_y, graph_x + graph_width, max_y)
+                love.graphics.setColor(1, 1, 1, 0.8)
+                love.graphics.print(string.format("%.1f", max_value), graph_x + graph_width + 5, max_y - 6)
+                
+                -- Draw average line reference
+                love.graphics.setColor(1, 1, 1, 0.3)
+                local avg_y = graph_y + graph_height - (stats.bandwidth_mbps / max_value) * graph_height
+                love.graphics.line(graph_x, avg_y, graph_x + graph_width, avg_y)
+                love.graphics.setColor(1, 1, 1, 0.8)
+                love.graphics.print(string.format("%.1f", stats.bandwidth_mbps), graph_x + graph_width + 5, avg_y - 6)
+            end
+        end
     else
+        love.graphics.setColor(1, 1, 1, 0.8)
         love.graphics.print("NDI: DISABLED", 10, 50)
     end
     
-    -- Show available shaders
+    -- Show available shaders (left side, no longer needs to move)
+    love.graphics.setColor(1, 1, 1, 0.8)
     for i, s in ipairs(shaders) do
         local prefix = (i == currentShaderIndex) and "> " or "  "
         love.graphics.print(prefix .. i .. ". " .. s.name, 10, 90 + i * 20)
