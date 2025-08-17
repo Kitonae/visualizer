@@ -57,10 +57,14 @@ function love.load()
         {name = "Kaleidoscope", file = "shaders/kaleidoscope.frag", hasBackground = false},
         {name = "Water Waves", file = "shaders/waves.frag", hasBackground = false},
         {name = "Animated Lines", file = "shaders/lines.frag", hasBackground = false},
-        {name = "Mono Lines", file = "shaders/lines_mono.frag", hasBackground = true}
+        {name = "Mono Lines", file = "shaders/lines_mono.frag", hasBackground = true},
+        {name = "Tunnel", file = "shaders/tunnel.frag", hasBackground = false},
+        {name = "Nebula", file = "shaders/nebula.frag", hasBackground = false},
+        {name = "Tunnel Purple", file = "shaders/tunnel_purple.frag", hasBackground = false},
+        {name = "Falling Stars", file = "shaders/falling_stars.frag", hasBackground = false}
     }
     
-    currentShaderIndex = 4 -- Start with mono lines
+    currentShaderIndex = 4 -- Start with mono lines (update to 4 or 5 if you want to start with new shaders)
     
     -- Initialize console first so we can log errors
     local console_success, console_error = pcall(function()
