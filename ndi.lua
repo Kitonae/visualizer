@@ -15,27 +15,50 @@ ffi.cdef[[
     int CloseHandle(void* hObject);
     uint32_t GetLastError();
     
-    // Performance Counters API
-    typedef void* PDH_HQUERY;
-    typedef void* PDH_HCOUNTER;
+    // iphlpapi for per-interface byte counters (Windows)
+    typedef unsigned long  DWORD;
+    typedef unsigned long  ULONG;
+    typedef wchar_t        WCHAR;
     
-    typedef struct {
-        uint32_t    CStatus;
-        union {
-            int32_t     longValue;
-            double      doubleValue;
-            int64_t     largeValue;
-            char*       AnsiStringValue;
-            wchar_t*    WideStringValue;
-        };
-    } PDH_FMT_COUNTERVALUE;
-    
-    uint32_t PdhOpenQueryA(const char* szDataSource, uint32_t dwUserData, PDH_HQUERY* phQuery);
-    uint32_t PdhAddCounterA(PDH_HQUERY hQuery, const char* szFullCounterPath, uint32_t dwUserData, PDH_HCOUNTER* phCounter);
-    uint32_t PdhCollectQueryData(PDH_HQUERY hQuery);
-    uint32_t PdhGetFormattedCounterValue(PDH_HCOUNTER hCounter, uint32_t dwFormat, uint32_t* lpdwType, PDH_FMT_COUNTERVALUE* pValue);
-    uint32_t PdhCloseQuery(PDH_HQUERY hQuery);
-    
+    static const int IF_MAX_STRING_SIZE = 256;
+    static const int MAXLEN_PHYSADDR    = 8;
+    static const int MAXLEN_IFDESCR     = 256;
+
+    typedef struct _MIB_IFROW {
+      WCHAR wszName[IF_MAX_STRING_SIZE + 1];
+      DWORD dwIndex;
+      DWORD dwType;
+      DWORD dwMtu;
+      DWORD dwSpeed;
+      DWORD dwPhysAddrLen;
+      unsigned char bPhysAddr[MAXLEN_PHYSADDR];
+      DWORD dwAdminStatus;
+      DWORD dwOperStatus;
+      DWORD dwLastChange;
+      DWORD dwInOctets;
+      DWORD dwInUcastPkts;
+      DWORD dwInNUcastPkts;
+      DWORD dwInDiscards;
+      DWORD dwInErrors;
+      DWORD dwInUnknownProtos;
+      DWORD dwOutOctets;
+      DWORD dwOutUcastPkts;
+      DWORD dwOutNUcastPkts;
+      DWORD dwOutDiscards;
+      DWORD dwOutErrors;
+      DWORD dwOutQLen;
+      DWORD dwDescrLen;
+      unsigned char bDescr[MAXLEN_IFDESCR];
+    } MIB_IFROW, *PMIB_IFROW;
+
+    typedef struct _MIB_IFTABLE {
+      DWORD      dwNumEntries;
+      MIB_IFROW  table[1]; // variable length
+    } MIB_IFTABLE, *PMIB_IFTABLE;
+
+    DWORD GetIfTable(PMIB_IFTABLE pIfTable, ULONG* pdwSize, int bOrder);
+    DWORD GetIfEntry(PMIB_IFROW pIfRow);
+
     // Process management
     typedef struct {
         uint32_t cb;
@@ -86,12 +109,8 @@ local CREATE_NO_WINDOW = 0x08000000
 local STILL_ACTIVE = 259
 local WAIT_TIMEOUT = 258
 
--- PDH (Performance Data Helper) constants
-local PDH_FMT_LARGE = 0x00000400
-local PDH_CSTATUS_VALID_DATA = 0x00000000
-
--- Load PDH library
-local pdh = ffi.load("pdh")
+-- Load iphlpapi for interface counters
+local iphlp = ffi.load("iphlpapi")
 
 -- Shared frame data structure (must match C++)
 ffi.cdef[[
@@ -131,143 +150,122 @@ local network_stats = {
     avg_bandwidth = 0
 }
 
--- Network interface monitoring
 local network_interface_stats = {
     last_bytes_sent = 0,
     last_check_time = 0,
     interface_name = nil,
-    use_fallback = false
+    index = nil
 }
 
--- Performance counters
-local perf_counters = {
-    query = nil,
-    counter = nil,
-    initialized = false
-}
+-- Internal helper for Windows NIC enumeration and byte reading
+local function _list_windows_interfaces()
+    local size_arr = ffi.new("ULONG[1]", 0)
+    local ERROR_INSUFFICIENT_BUFFER = 122
+    local NO_ERROR = 0
+    local rc = iphlp.GetIfTable(nil, size_arr, 0)
+    if rc ~= ERROR_INSUFFICIENT_BUFFER and rc ~= NO_ERROR then
+        return {}
+    end
+    local buf = ffi.new("uint8_t[?]", size_arr[0])
+    rc = iphlp.GetIfTable(ffi.cast("PMIB_IFTABLE", buf), size_arr, 0)
+    if rc ~= NO_ERROR then
+        return {}
+    end
+    local tbl = ffi.cast("PMIB_IFTABLE", buf)
+    local count = tonumber(tbl.dwNumEntries)
+    local out = {}
+    for i = 0, count - 1 do
+        local row = tbl.table[i]
+        local name = ""
+        -- Convert WCHAR name to UTF-8 (best effort): read until NUL and cast bytes
+        do
+            local n = 0
+            while n <= ffi.C.IF_MAX_STRING_SIZE and row.wszName[n] ~= 0 do n = n + 1 end
+            -- each WCHAR is 2 bytes; we won't convert properly here to keep FFI minimal
+            -- but description usually carries a readable ASCII name
+        end
+        local desc = ffi.string(ffi.cast("char*", row.bDescr), math.min(tonumber(row.dwDescrLen), ffi.C.MAXLEN_IFDESCR))
+        table.insert(out, {
+            index = tonumber(row.dwIndex),
+            desc = desc,
+            oper_status = tonumber(row.dwOperStatus),
+            speed_bps = tonumber(row.dwSpeed)
+        })
+    end
+    return out
+end
+
+local function _choose_windows_interface()
+    local ifs = _list_windows_interfaces()
+    if #ifs == 0 then return nil end
+    table.sort(ifs, function(a,b)
+        local au = (a.oper_status == 1) and 1 or 0
+        local bu = (b.oper_status == 1) and 1 or 0
+        if au ~= bu then return au > bu end
+        return a.speed_bps > b.speed_bps
+    end)
+    return ifs[1]
+end
+
+local function _get_windows_tx_bytes(index)
+    local row = ffi.new("MIB_IFROW")
+    row.dwIndex = index
+    local NO_ERROR = 0
+    local rc = iphlp.GetIfEntry(row)
+    if rc ~= NO_ERROR then return nil end
+    return tonumber(row.dwOutOctets)
+end
 
 local SHARED_MEMORY_NAME = "LOVE_NDI_SHARED_FRAME"
 local MAGIC_NUMBER = 0xDEADBEEF
 local NDI_SENDER_PATH = "ndi_sender.exe"
 
 function M.init_performance_counters()
-    if perf_counters.initialized then
-        return true
-    end
-    
-    local success, result = pcall(function()
-        -- Create a new query
-        local query = ffi.new("PDH_HQUERY[1]")
-        local status = pdh.PdhOpenQueryA(nil, 0, query)
-        if status ~= 0 then
-            error("Failed to open PDH query: " .. status)
-        end
-        perf_counters.query = query[0]
-        
-        -- Try different counter paths in order of preference
-        local counter_paths = {
-            "\\Network Interface(_Total)\\Bytes Sent/sec",
-            "\\Network Interface(*)\\Bytes Sent/sec",
-            "\\Network Interface\\Bytes Sent/sec"
-        }
-        
-        local counter = ffi.new("PDH_HCOUNTER[1]")
-        local success_path = nil
-        
-        for _, counter_path in ipairs(counter_paths) do
-            local status = pdh.PdhAddCounterA(perf_counters.query, counter_path, 0, counter)
-            if status == 0 then
-                success_path = counter_path
-                break
-            end
-        end
-        
-        if not success_path then
-            error("All counter paths failed")
-        end
-        
-        perf_counters.counter = counter[0]
-        
-        -- Collect initial data multiple times to ensure it's working
-        for i = 1, 3 do
-            pdh.PdhCollectQueryData(perf_counters.query)
-            love.timer.sleep(0.1)
-        end
-        
-        perf_counters.initialized = true
-        return true
-    end)
-    
-    if not success then
-        return false
-    end
-    
-    return result
+    -- Backward-compatible entry point: initialize Windows NIC selection/state
+    if network_interface_stats.index then return true end
+    local chosen = _choose_windows_interface()
+    if not chosen then return false end
+    network_interface_stats.index = chosen.index
+    network_interface_stats.interface_name = chosen.desc
+    network_interface_stats.last_bytes_sent = _get_windows_tx_bytes(network_interface_stats.index) or 0
+    network_interface_stats.last_check_time = love.timer.getTime()
+    return true
 end
 
 -- Fallback to simpler network monitoring if performance counters fail
 function M.fallback_to_simple_monitoring()
-    perf_counters.initialized = false
-    network_interface_stats.use_fallback = true
+    -- No longer used; keep for compatibility
+    return false
 end
 
 function M.get_network_interface_bytes()
-    -- If performance counters failed, use fallback method
-    if network_interface_stats.use_fallback then
-        -- Return a reasonable estimate based on NDI frame data
-        if network_stats.current_fps > 0 and network_stats.last_frame_time > 0 then
-            -- Estimate network usage based on NDI frames being sent
-            -- Assume some overhead and compression for actual network traffic
-            local estimated_bandwidth = (network_stats.bytes_sent / (love.timer.getTime() - (start_time or 0))) * 0.8 -- 80% efficiency estimate
-            return estimated_bandwidth
-        end
-        return 0
-    end
-    
-    if not perf_counters.initialized then
+    -- Ensure NIC monitor is initialized
+    if not network_interface_stats.index then
         if not M.init_performance_counters() then
-            M.fallback_to_simple_monitoring()
-            return M.get_network_interface_bytes() -- Retry with fallback
-        end
-    end
-    
-    local success, result = pcall(function()
-        -- Collect current data
-        local status = pdh.PdhCollectQueryData(perf_counters.query)
-        if status ~= 0 then
-            M.fallback_to_simple_monitoring()
             return 0
         end
-        
-        -- Get the formatted counter value
-        local counter_value = ffi.new("PDH_FMT_COUNTERVALUE")
-        local counter_type = ffi.new("uint32_t[1]")
-        
-        status = pdh.PdhGetFormattedCounterValue(perf_counters.counter, PDH_FMT_LARGE, counter_type, counter_value)
-        if status == PDH_CSTATUS_VALID_DATA then
-            return tonumber(counter_value.largeValue)
-        else
-            M.fallback_to_simple_monitoring()
-        end
-        
-        return 0
-    end)
-    
-    if not success then
-        M.fallback_to_simple_monitoring()
+    end
+    local tx = _get_windows_tx_bytes(network_interface_stats.index)
+    if not tx then return 0 end
+    local now = love.timer.getTime()
+    local last_tx = network_interface_stats.last_bytes_sent or 0
+    local dt = now - (network_interface_stats.last_check_time or 0)
+    if last_tx == 0 or dt <= 0 then
+        network_interface_stats.last_bytes_sent = tx
         return 0
     end
-    
-    return result
+    local dtx = tx - last_tx
+    if dtx < 0 then
+        dtx = dtx + 4294967296 -- handle 32-bit counter wrap
+    end
+    local bytes_per_sec = dtx / dt
+    network_interface_stats.last_bytes_sent = tx
+    return bytes_per_sec
 end
 
 function M.cleanup_performance_counters()
-    if perf_counters.query then
-        pdh.PdhCloseQuery(perf_counters.query)
-        perf_counters.query = nil
-    end
-    perf_counters.counter = nil
-    perf_counters.initialized = false
+    network_interface_stats.index = nil
+    network_interface_stats.last_bytes_sent = 0
 end
 
 function M.update_network_interface_stats()
