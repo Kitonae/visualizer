@@ -1,6 +1,7 @@
 -- NDI sender using shared memory with managed C++ subprocess
 local ffi = require("ffi")
 local bit = require("bit")
+local logger = require("logger")
 
 local M = {}
 
@@ -15,10 +16,35 @@ ffi.cdef[[
     int CloseHandle(void* hObject);
     uint32_t GetLastError();
     
+<<<<<<< Updated upstream
     // iphlpapi for per-interface byte counters (Windows)
     typedef unsigned long  DWORD;
     typedef unsigned long  ULONG;
     typedef wchar_t        WCHAR;
+=======
+    // Performance Counters API
+    typedef void* PDH_HQUERY;
+    typedef void* PDH_HCOUNTER;
+    
+    typedef struct {
+        uint32_t    CStatus;
+        union {
+            int32_t     longValue;
+            double      doubleValue;
+            int64_t     largeValue;
+            char*       AnsiStringValue;
+            wchar_t*    WideStringValue;
+        };
+    } PDH_FMT_COUNTERVALUE;
+    
+    uint32_t PdhOpenQueryA(const char* szDataSource, uint32_t dwUserData, PDH_HQUERY* phQuery);
+    uint32_t PdhAddCounterA(PDH_HQUERY hQuery, const char* szFullCounterPath, uint32_t dwUserData, PDH_HCOUNTER* phCounter);
+    uint32_t PdhAddEnglishCounterA(PDH_HQUERY hQuery, const char* szFullCounterPath, uint32_t dwUserData, PDH_HCOUNTER* phCounter);
+    uint32_t PdhCollectQueryData(PDH_HQUERY hQuery);
+    uint32_t PdhGetFormattedCounterValue(PDH_HCOUNTER hCounter, uint32_t dwFormat, uint32_t* lpdwType, PDH_FMT_COUNTERVALUE* pValue);
+    uint32_t PdhCloseQuery(PDH_HQUERY hQuery);
+    uint32_t PdhExpandWildCardPathA(const char* szDataSource, const char* szWildCardPath, char* mszExpandedPathList, uint32_t* pcchPathListLength, uint32_t dwFlags);
+>>>>>>> Stashed changes
     
     static const int IF_MAX_STRING_SIZE = 256;
     static const int MAXLEN_PHYSADDR    = 8;
@@ -109,8 +135,19 @@ local CREATE_NO_WINDOW = 0x08000000
 local STILL_ACTIVE = 259
 local WAIT_TIMEOUT = 258
 
+<<<<<<< Updated upstream
 -- Load iphlpapi for interface counters
 local iphlp = ffi.load("iphlpapi")
+=======
+-- Use DOUBLE format for rate counters like Bytes/sec
+local PDH_FMT_DOUBLE = 0x00000200
+local PDH_FMT_LARGE = 0x00000400 -- kept for reference (not used)
+local PDH_CSTATUS_VALID_DATA = 0x00000000
+local PDH_CSTATUS_NEW_DATA = 0x00000001
+
+-- Load PDH library
+local pdh = ffi.load("pdh")
+>>>>>>> Stashed changes
 
 -- Shared frame data structure (must match C++)
 ffi.cdef[[
@@ -154,6 +191,7 @@ local network_interface_stats = {
     last_bytes_sent = 0,
     last_check_time = 0,
     interface_name = nil,
+<<<<<<< Updated upstream
     index = nil
 }
 
@@ -215,12 +253,26 @@ local function _get_windows_tx_bytes(index)
     if rc ~= NO_ERROR then return nil end
     return tonumber(row.dwOutOctets)
 end
+=======
+    use_fallback = false,
+    zero_count = 0
+}
+
+-- Performance counters
+local perf_counters = {
+    query = nil,
+    counter = nil,
+    counters = nil,
+    initialized = false
+}
+>>>>>>> Stashed changes
 
 local SHARED_MEMORY_NAME = "LOVE_NDI_SHARED_FRAME"
 local MAGIC_NUMBER = 0xDEADBEEF
 local NDI_SENDER_PATH = "ndi_sender.exe"
 
 function M.init_performance_counters()
+<<<<<<< Updated upstream
     -- Backward-compatible entry point: initialize Windows NIC selection/state
     if network_interface_stats.index then return true end
     local chosen = _choose_windows_interface()
@@ -230,6 +282,107 @@ function M.init_performance_counters()
     network_interface_stats.last_bytes_sent = _get_windows_tx_bytes(network_interface_stats.index) or 0
     network_interface_stats.last_check_time = love.timer.getTime()
     return true
+=======
+    if perf_counters.initialized then
+        return true
+    end
+    
+    local success, result = pcall(function()
+        logger.info("PDH: Initializing performance counters")
+        -- Create a new query
+        local query = ffi.new("PDH_HQUERY[1]")
+        local status = pdh.PdhOpenQueryA(nil, 0, query)
+        if status ~= 0 then
+            logger.error("PDH: PdhOpenQueryA failed status=" .. tostring(status))
+            error("Failed to open PDH query: " .. status)
+        end
+        perf_counters.query = query[0]
+        
+        -- Prefer English counter names (works across locales)
+        local function try_add_counter(path)
+            local c = ffi.new("PDH_HCOUNTER[1]")
+            local st
+            -- Try the English variant if available on this OS; call in pcall to avoid symbol errors
+            local ok_call, ret = pcall(function()
+                return pdh.PdhAddEnglishCounterA(perf_counters.query, path, 0, c)
+            end)
+            if ok_call then
+                st = ret
+            else
+                st = pdh.PdhAddCounterA(perf_counters.query, path, 0, c)
+            end
+            if st == 0 then
+                logger.info("PDH: Added counter " .. path)
+                return true, c[0]
+            else
+                logger.debug("PDH: Failed to add counter " .. path .. " status=" .. tostring(st))
+                return false, st
+            end
+        end
+
+        -- First try total bytes (TX+RX), then TX only
+        local ok, c = try_add_counter("\\Network Interface(_Total)\\Bytes Total/sec")
+        if ok then
+            perf_counters.counter = c
+            if debug_output then print("PDH: Using _Total Bytes Total/sec") end
+        else
+            ok, c = try_add_counter("\\Network Interface(_Total)\\Bytes Sent/sec")
+            if ok then
+                perf_counters.counter = c
+                if debug_output then print("PDH: Using _Total Bytes Sent/sec") end
+            else
+                -- Fall back to summing all interfaces via wildcard expansion
+                local function add_wildcard(wildcard)
+                    local needed = ffi.new("uint32_t[1]", 0)
+                    pdh.PdhExpandWildCardPathA(nil, wildcard, nil, needed, 0)
+                    local sz = tonumber(needed[0])
+                    if not sz or sz == 0 then return false end
+                    local buf = ffi.new("char[?]", sz)
+                    local st = pdh.PdhExpandWildCardPathA(nil, wildcard, buf, needed, 0)
+                    if st ~= 0 then return false end
+                    perf_counters.counters = {}
+                    local i = 0
+                    while true do
+                        local s = ffi.string(buf + i)
+                        if #s == 0 then break end
+                        local ok_one, c_one = try_add_counter(s)
+                        if ok_one then table.insert(perf_counters.counters, c_one) end
+                        i = i + #s + 1
+                    end
+                    local ok_list = perf_counters.counters and #perf_counters.counters > 0
+                    if ok_list and debug_output then
+                        print("PDH: Using wildcard " .. wildcard .. " across " .. tostring(#perf_counters.counters) .. " counters")
+                    end
+                    return ok_list
+                end
+                if not add_wildcard("\\Network Interface(*)\\Bytes Total/sec") then
+                    if not add_wildcard("\\Network Interface(*)\\Bytes Sent/sec") then
+                        logger.error("PDH: Failed to add any network interface counters")
+                        error("Failed to add any network interface counters")
+                    end
+                end
+            end
+        end
+        
+        -- Collect initial data multiple times to ensure it's working
+        for i = 1, 3 do
+            local s = pdh.PdhCollectQueryData(perf_counters.query)
+            logger.debug("PDH: Initial collect status=" .. tostring(s))
+            love.timer.sleep(0.1)
+        end
+        
+        perf_counters.initialized = true
+        logger.info("PDH: Initialized successfully")
+        return true
+    end)
+    
+    if not success then
+        logger.warn("PDH: Initialization failed, will fall back if needed")
+        return false
+    end
+    
+    return result
+>>>>>>> Stashed changes
 end
 
 -- Fallback to simpler network monitoring if performance counters fail
@@ -239,6 +392,7 @@ function M.fallback_to_simple_monitoring()
 end
 
 function M.get_network_interface_bytes()
+<<<<<<< Updated upstream
     -- Ensure NIC monitor is initialized
     if not network_interface_stats.index then
         if not M.init_performance_counters() then
@@ -252,6 +406,70 @@ function M.get_network_interface_bytes()
     local dt = now - (network_interface_stats.last_check_time or 0)
     if last_tx == 0 or dt <= 0 then
         network_interface_stats.last_bytes_sent = tx
+=======
+    -- If performance counters failed, use fallback method
+    if network_interface_stats.use_fallback then
+        -- Return a reasonable estimate based on NDI frame data
+        if network_stats.current_fps > 0 and network_stats.last_frame_time > 0 then
+            -- Estimate network usage based on NDI frames being sent
+            -- Assume some overhead and compression for actual network traffic
+            local estimated_bandwidth = (network_stats.bytes_sent / (love.timer.getTime() - (start_time or 0))) * 0.8 -- 80% efficiency estimate
+            logger.debug("PDH: Using fallback estimate Bps=" .. tostring(estimated_bandwidth))
+            return estimated_bandwidth
+        end
+        logger.debug("PDH: Fallback active but insufficient data, returning 0")
+        return 0
+    end
+    
+    if not perf_counters.initialized then
+        if not M.init_performance_counters() then
+            M.fallback_to_simple_monitoring()
+            return M.get_network_interface_bytes() -- Retry with fallback
+        end
+    end
+    
+    local success, result = pcall(function()
+        -- Collect current data
+        local status = pdh.PdhCollectQueryData(perf_counters.query)
+        if status ~= 0 then
+            logger.warn("PDH: CollectQueryData failed status=" .. tostring(status) .. ", enabling fallback")
+            M.fallback_to_simple_monitoring()
+            return 0
+        end
+        
+        -- Read either the single total counter or sum per-interface counters
+        local function read_counter(c)
+            local v = ffi.new("PDH_FMT_COUNTERVALUE")
+            local t = ffi.new("uint32_t[1]")
+            local st = pdh.PdhGetFormattedCounterValue(c, PDH_FMT_DOUBLE, t, v)
+            if st == PDH_CSTATUS_VALID_DATA or st == PDH_CSTATUS_NEW_DATA then
+                return tonumber(v.doubleValue) or 0
+            end
+            logger.debug("PDH: GetFormattedCounterValue non-success status=" .. tostring(st))
+            return 0
+        end
+
+        if perf_counters.counter ~= nil then
+            local val = read_counter(perf_counters.counter)
+            logger.debug("PDH: _Total sample Bps=" .. tostring(val))
+            return val
+        elseif perf_counters.counters ~= nil then
+            local sum = 0
+            for _, c in ipairs(perf_counters.counters) do
+                sum = sum + read_counter(c)
+            end
+            logger.debug("PDH: Summed interfaces sample Bps=" .. tostring(sum))
+            return sum
+        else
+            M.fallback_to_simple_monitoring()
+        end
+        
+        return 0
+    end)
+    
+    if not success then
+        M.fallback_to_simple_monitoring()
+>>>>>>> Stashed changes
         return 0
     end
     local dtx = tx - last_tx
@@ -264,8 +482,18 @@ function M.get_network_interface_bytes()
 end
 
 function M.cleanup_performance_counters()
+<<<<<<< Updated upstream
     network_interface_stats.index = nil
     network_interface_stats.last_bytes_sent = 0
+=======
+    if perf_counters.query then
+        pdh.PdhCloseQuery(perf_counters.query)
+        perf_counters.query = nil
+    end
+    perf_counters.counter = nil
+    perf_counters.counters = nil
+    perf_counters.initialized = false
+>>>>>>> Stashed changes
 end
 
 function M.update_network_interface_stats()
@@ -282,6 +510,18 @@ function M.update_network_interface_stats()
             table.remove(network_stats.bandwidth_history, 1)
         end
         
+        -- If PDH appears stuck at zero while frames are being sent, fall back
+        if bandwidth <= 0 and network_stats.frames_sent > 0 then
+            network_interface_stats.zero_count = network_interface_stats.zero_count + 1
+            if network_interface_stats.zero_count >= 3 then
+                logger.warn("PDH: 3 consecutive zero samples while sending frames; switching to fallback estimate")
+                M.fallback_to_simple_monitoring()
+                bandwidth = M.get_network_interface_bytes()
+            end
+        else
+            network_interface_stats.zero_count = 0
+        end
+
         -- Update max bandwidth if we have a positive value
         if bandwidth > 0 and bandwidth > network_stats.max_bandwidth then
             network_stats.max_bandwidth = bandwidth
@@ -295,6 +535,7 @@ function M.update_network_interface_stats()
         network_stats.avg_bandwidth = #network_stats.bandwidth_history > 0 and (sum / #network_stats.bandwidth_history) or 0
         
         network_interface_stats.last_check_time = current_time
+        logger.debug(string.format("PDH: bandwidth %.2f B/s (%.2f MB/s)", bandwidth, bandwidth / (1024*1024)))
     end
 end
 
@@ -669,6 +910,8 @@ function M.start_streaming(source_name)
     source_name = source_name or "LÖVE Visualizer"
     if M.initialize() then
         -- Initialize performance counters for real-time network monitoring
+        logger.init("logs/ndi.log")
+        logger.set_level(debug_output and "debug" or "info")
         M.init_performance_counters()
         network_interface_stats.last_check_time = love.timer.getTime()
         
@@ -743,6 +986,7 @@ end
 
 function M.set_debug_output(enabled)
     debug_output = enabled
+    logger.set_level(enabled and "debug" or "info")
     return debug_output
 end
 
