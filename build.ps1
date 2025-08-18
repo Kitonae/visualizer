@@ -33,8 +33,10 @@ $FilesToCopy = @(
     "main.lua",
     "console.lua", 
     "conf.lua",
+    "capture.lua",
     "ndi.lua",
     "forest.png",
+    "logo.png",
     "Processing.NDI.Lib.Runtime.x64.dll",
     "Processing.NDI.Lib.x64.dll"
 )
@@ -58,6 +60,12 @@ if (Test-Path "shaders") {
 if (Test-Path "build\ndi_sender.exe") {
     Copy-Item "build\ndi_sender.exe" $TempDir -Force
     Write-Host "  Copied: ndi_sender.exe" -ForegroundColor Gray
+}
+
+# Copy capture sender executable if present
+if (Test-Path "build\capture_sender.exe") {
+    Copy-Item "build\capture_sender.exe" $TempDir -Force
+    Write-Host "  Copied: capture_sender.exe" -ForegroundColor Gray
 }
 
 # Create .love file
@@ -153,6 +161,11 @@ if ($LoveExe -and (Test-Path $LoveExe)) {
         if (Test-Path "build\ndi_sender.exe") {
             Copy-Item "build\ndi_sender.exe" $BuildDir -Force
             Write-Host "  Copied: ndi_sender.exe" -ForegroundColor Gray
+        }
+        # Copy capture sender
+        if (Test-Path "build\capture_sender.exe") {
+            Copy-Item "build\capture_sender.exe" $BuildDir -Force
+            Write-Host "  Copied: capture_sender.exe" -ForegroundColor Gray
         }
     } else {
         Write-Host "Failed to create executable" -ForegroundColor Red

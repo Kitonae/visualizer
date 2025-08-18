@@ -277,6 +277,36 @@ local function execute_command(cmd)
                 M.error("Usage: ndi debug [on|off]")
             end
         end
+    elseif command == "capture" then
+        if #args == 0 or args[1] == "status" then
+            local cap = require("capture")
+            M.log("Capture: " .. cap.get_status())
+        elseif args[1] == "start" then
+            local cap = require("capture")
+            local title = table.concat(args, " ", 2)
+            -- Default to PowerPoint Slide Show when no title provided
+            if title == "" then title = "PowerPoint Slide Show" end
+            if cap.start(title) then
+                M.success("Capture started for title contains: '" .. title .. "'")
+            else
+                M.error("Failed to start capture")
+            end
+        elseif args[1] == "stop" then
+            local cap = require("capture")
+            cap.stop()
+            M.success("Capture stopped")
+        elseif args[1] == "dump" or args[1] == "screenshot" or args[1] == "shot" then
+            local cap = require("capture")
+            local filename = args[2] or ""
+            local ok, out = cap.dump(filename)
+            if ok then
+                M.success("Saved capture screenshot: " .. out)
+            else
+                M.error("Failed to save screenshot: " .. tostring(out))
+            end
+        else
+            M.error("Usage: capture [status|start [title...]|stop|dump [filename]]")
+        end
     elseif command == "shader" then
         if #args == 0 or args[1] == "list" then
             M.log("Available shaders:")

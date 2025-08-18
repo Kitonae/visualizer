@@ -1,0 +1,10 @@
+=== Building capture_sender (Windows Graphics Capture) ===
+Visual Studio compiler not found in PATH. Trying to locate VS 2022...
+**********************************************************************
+** Visual Studio 2022 Developer Command Prompt v17.11.4
+** Copyright (c) 2022 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+Compiling capture_sender.cpp ...
+capture_sender.cpp
+Build succeeded: build\capture_sender.exe
