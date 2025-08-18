@@ -256,9 +256,9 @@ function love.draw()
                 stats.frames_sent, stats.current_fps, stats.receiver_count), telemetry_x, 10)
             love.graphics.print(string.format("Data: %s", 
                 ndi.format_bytes(stats.bytes_sent)), telemetry_x, 30)
-            love.graphics.print(string.format("Bandwidth: %.1f MB/s", 
+            love.graphics.print(string.format("Bandwidth: %.1f Mbps", 
                 stats.bandwidth_mbps), telemetry_x, 50)
-            love.graphics.print(string.format("Peak: %.1f MB/s | Uptime: %.0fs", 
+            love.graphics.print(string.format("Peak: %.1f Mbps | Uptime: %.0fs", 
                 stats.max_bandwidth_mbps, stats.uptime), telemetry_x, 70)
             
             -- Draw network load graph (right side)
@@ -278,18 +278,21 @@ function love.draw()
                 
                 -- Graph title
                 love.graphics.setColor(1, 1, 1, 0.8)
-                love.graphics.print("Network Load (MB/s)", graph_x + 5, graph_y - 15)
+                love.graphics.print("Network Load (Mbps)", graph_x + 5, graph_y - 15)
                 
                 -- Draw graph lines
                 local max_value = math.max(stats.max_bandwidth_mbps, 1) -- Avoid division by zero
                 love.graphics.setColor(0, 1, 0, 0.8)
-                
+
                 for i = 2, #stats.bandwidth_history do
                     local x1 = graph_x + ((i - 2) / (#stats.bandwidth_history - 1)) * graph_width
                     local x2 = graph_x + ((i - 1) / (#stats.bandwidth_history - 1)) * graph_width
-                    
-                    local y1 = graph_y + graph_height - ((stats.bandwidth_history[i - 1] / (1024 * 1024)) / max_value) * graph_height
-                    local y2 = graph_y + graph_height - ((stats.bandwidth_history[i] / (1024 * 1024)) / max_value) * graph_height
+
+                    -- Convert bytes/sec to Mbps for plotting
+                    local mbps1 = (stats.bandwidth_history[i - 1] * 8) / 1e6
+                    local mbps2 = (stats.bandwidth_history[i] * 8) / 1e6
+                    local y1 = graph_y + graph_height - (mbps1 / max_value) * graph_height
+                    local y2 = graph_y + graph_height - (mbps2 / max_value) * graph_height
                     
                     love.graphics.line(x1, y1, x2, y2)
                 end
