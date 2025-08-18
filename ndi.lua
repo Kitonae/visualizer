@@ -154,7 +154,7 @@ local perf_counters = {
 
 local SHARED_MEMORY_NAME = "LOVE_NDI_SHARED_FRAME"
 local MAGIC_NUMBER = 0xDEADBEEF
-local NDI_SENDER_PATH = "ndi_sender.exe"
+local NDI_SENDER_PATH = "build/ndi_sender.exe"
 
 function M.init_performance_counters()
     if perf_counters.initialized then
@@ -423,14 +423,22 @@ function M.start_ndi_process()
     M.kill_existing_ndi_processes()
     
     local success, result = pcall(function()
-        -- Check if NDI sender executable exists
-        local file = io.open(NDI_SENDER_PATH, "r")
-        if not file then
-            error("NDI sender executable not found at: " .. NDI_SENDER_PATH)
+        -- Resolve NDI sender executable (try common locations)
+        local candidates = {
+            NDI_SENDER_PATH,
+            "build/ndi_sender.exe",
+            "ndi_sender.exe"
+        }
+        local resolved = nil
+        for _, p in ipairs(candidates) do
+            local f = io.open(p, "r")
+            if f then f:close(); resolved = p; break end
         end
-        file:close()
+        if not resolved then
+            error("NDI sender executable not found. Tried: " .. table.concat(candidates, ", "))
+        end
         
-        print("Starting NDI sender process: " .. NDI_SENDER_PATH)
+        print("Starting NDI sender process: " .. resolved)
         
         -- Set up process startup info for headless operation
         local startup_info = ffi.new("STARTUPINFOA")
@@ -441,7 +449,7 @@ function M.start_ndi_process()
         process_info = ffi.new("PROCESS_INFORMATION")
         
         -- Create the process
-        local command_line = ffi.new("char[?]", #NDI_SENDER_PATH + 1, NDI_SENDER_PATH)
+        local command_line = ffi.new("char[?]", #resolved + 1, resolved)
         local result = ffi.C.CreateProcessA(
             nil,  -- lpApplicationName
             command_line,  -- lpCommandLine (now properly converted)
@@ -755,10 +763,17 @@ end
 
 function M.start_streaming(source_name)
     source_name = source_name or "LÖVE Visualizer"
+    -- Initialize logging first so failures are captured and path is visible
+    logger.init("logs/ndi.log")
+    logger.set_level(debug_output and "debug" or "info")
+    if love and love.filesystem and love.filesystem.getSaveDirectory then
+        local path_msg = string.format("NDI logs at: %s/%s", love.filesystem.getSaveDirectory(), "logs/ndi.log")
+        print(path_msg)
+        logger.info(path_msg)
+    end
+
     if M.initialize() then
         -- Initialize performance counters for real-time network monitoring
-        logger.init("logs/ndi.log")
-        logger.set_level(debug_output and "debug" or "info")
         M.init_performance_counters()
         network_interface_stats.last_check_time = love.timer.getTime()
         
