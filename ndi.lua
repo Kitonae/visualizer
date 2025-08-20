@@ -109,7 +109,12 @@ ffi.cdef[[
         uint64_t timestamp_us;    // Microseconds since start
         uint32_t data_size;
         uint32_t receiver_count;  // Number of connected NDI receivers
-        uint8_t pixel_data[1];    // Variable length array (we'll handle size separately)
+        uint32_t active_index;    // 0 or 1
+        uint32_t buffer_capacity; // bytes per buffer
+        uint32_t reserved0;
+        uint32_t reserved1;
+        uint64_t buf_offset[2];   // offsets from base
+        uint8_t pixel_data[1];    // start of buffer space
     } SharedFrameData;
 ]]
 
@@ -211,6 +216,7 @@ end
 local SHARED_MEMORY_NAME = "LOVE_NDI_SHARED_FRAME"
 local MAGIC_NUMBER = 0xDEADBEEF
 local NDI_SENDER_PATH = "build/ndi_sender.exe"
+local MAPPING_SIZE = 256 * 1024 * 1024 -- 256MB to enable double buffering at high resolutions
 
 function M.init_performance_counters()
     if perf_counters.initialized then
@@ -639,7 +645,7 @@ function M.initialize()
                 nil,
                 PAGE_READWRITE,
                 0,
-                64 * 1024 * 1024, -- 64MB for 4K+ frames
+                MAPPING_SIZE,
                 SHARED_MEMORY_NAME
             )
             
@@ -664,7 +670,7 @@ function M.initialize()
             FILE_MAP_ALL_ACCESS,
             0,
             0,
-            64 * 1024 * 1024 -- 64MB
+            MAPPING_SIZE
         ))
         
         if shared_data == nil or shared_data == ffi.cast("uint8_t*", 0) then
@@ -718,9 +724,17 @@ function M.send_frame(capture_canvas)
         end
         
         local data_size = width * height * 4 -- RGBA
-        local max_data_size = 64 * 1024 * 1024 - ffi.offsetof("SharedFrameData", "pixel_data")
-        if data_size > max_data_size then
-            print("Frame too large for shared memory buffer: " .. data_size .. " (max: " .. max_data_size .. ")")
+        
+        -- Determine target buffer (double-buffered): write to the inactive buffer
+        local active_index = tonumber(header.active_index)
+        local next_index = (active_index == 0) and 1 or 0
+        local capacity = tonumber(header.buffer_capacity or 0)
+        if capacity == nil or capacity <= 0 then
+            print("NDI shared memory header not initialized; skipping frame")
+            return false
+        end
+        if data_size > capacity then
+            print("Frame too large for buffer: " .. data_size .. " (capacity: " .. capacity .. ")")
             return false
         end
         
@@ -729,19 +743,23 @@ function M.send_frame(capture_canvas)
         local timestamp_us = math.floor((current_time - start_time) * 1000000)
         frame_counter = frame_counter + 1
         
-        -- Fill shared data structure
+        -- Fill shared data structure (publish frame_number LAST to avoid tearing)
         header.magic = MAGIC_NUMBER
         header.width = width
         header.height = height
         header.format = 0 -- RGBA format
-        header.frame_number = frame_counter
         header.timestamp_us = timestamp_us
         header.data_size = data_size
-        
-        -- Copy pixel data to the area after the header
+
+        -- Copy pixel data to the inactive buffer
         local pixels = imageData:getString()
-        local pixel_data_ptr = shared_data + ffi.offsetof("SharedFrameData", "pixel_data")
+        local target_off = tonumber(header.buf_offset[next_index])
+        local pixel_data_ptr = shared_data + target_off
         ffi.copy(pixel_data_ptr, pixels, math.min(data_size, #pixels))
+
+        -- Publish new active buffer first, then frame number last as commit
+        header.active_index = next_index
+        header.frame_number = frame_counter
         
         -- Update network statistics
         network_stats.bytes_sent = network_stats.bytes_sent + data_size

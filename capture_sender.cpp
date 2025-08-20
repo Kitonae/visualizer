@@ -208,10 +208,14 @@ int wmain(int argc, wchar_t** argv)
     }
 
     // Create frame pool and session
+    if (!GraphicsCaptureSession::IsSupported()) {
+        log_line(L"GraphicsCaptureSession::IsSupported() == false");
+    }
     auto pixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
     auto pool = Direct3D11CaptureFramePool::Create(winrtDevice, pixelFormat, 2, size);
     auto session = pool.CreateCaptureSession(item);
     session.IsCursorCaptureEnabled(true);
+    session.IsBorderRequired(false);
     session.StartCapture();
     log_line(L"capture started");
 
@@ -302,6 +306,9 @@ int wmain(int argc, wchar_t** argv)
                             header->frame_number = frameCounter.fetch_add(1) + 1;
                             header->data_size = static_cast<uint32_t>(total);
                             header->magic = MAGIC;
+                            if ((printed % 120) == 0) {
+                                log_line(L"write frame: " + std::to_wstring(w) + L"x" + std::to_wstring(h) + L", bytes=" + std::to_wstring(total));
+                            }
                         }
                         ctx->Unmap(staging.get(), 0);
                     }

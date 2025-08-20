@@ -6,6 +6,7 @@
 #include <memory>
 #include <signal.h>
 #include <atomic>
+#include <cstddef> // for offsetof
 
 // Global flag for graceful shutdown
 std::atomic<bool> should_exit(false);
@@ -36,7 +37,13 @@ struct SharedFrameData {
     uint64_t timestamp_us;    // Microseconds since start
     uint32_t data_size;
     uint32_t receiver_count;  // Number of connected NDI receivers
-    uint8_t pixel_data[1920 * 1080 * 4]; // Max size for RGBA at 1080p
+    uint32_t active_index;    // 0 or 1
+    uint32_t buffer_capacity; // bytes per buffer
+    uint32_t reserved0;
+    uint32_t reserved1;
+    uint64_t buf_offset[2];   // offsets from base to each buffer
+    // Flexible-size trailing buffer. The mapped view provides the full capacity.
+    uint8_t pixel_data[1];
 };
 
 class NDISender {
@@ -63,12 +70,13 @@ public:
         std::cout << "NDI library initialized successfully" << std::endl;
         
         // Create shared memory
+        const size_t MAPPING_SIZE = size_t(256) * 1024 * 1024; // 256MB
         shared_memory = CreateFileMappingA(
             INVALID_HANDLE_VALUE,
             nullptr,
             PAGE_READWRITE,
             0,
-            64 * 1024 * 1024, // 64MB for 4K+ frames
+            (DWORD)MAPPING_SIZE, // large enough for double buffering
             SHARED_MEMORY_NAME
         );
         
@@ -82,7 +90,7 @@ public:
             FILE_MAP_ALL_ACCESS,
             0,
             0,
-            64 * 1024 * 1024 // 64MB
+            MAPPING_SIZE
         ));
         
         if (!shared_data) {
@@ -90,10 +98,18 @@ public:
             return false;
         }
         
-        // Initialize shared data
-        memset(shared_data, 0, sizeof(SharedFrameData));
+        // Initialize shared data header (do not assume fixed struct size)
+        const size_t header_size = offsetof(SharedFrameData, pixel_data);
+        memset(shared_data, 0, header_size);
         shared_data->magic = MAGIC_NUMBER;
         shared_data->receiver_count = 0;
+        // Compute double-buffer layout
+        const size_t capacity = MAPPING_SIZE - header_size;
+        const size_t per_buffer = capacity / 2;
+        shared_data->active_index = 0;
+        shared_data->buffer_capacity = static_cast<uint32_t>(per_buffer);
+        shared_data->buf_offset[0] = header_size;
+        shared_data->buf_offset[1] = header_size + per_buffer;
         
         std::cout << "Shared memory created successfully at: " << SHARED_MEMORY_NAME << std::endl;
         return true;
@@ -146,7 +162,7 @@ public:
         auto start_time = std::chrono::high_resolution_clock::now();
         
         while (!should_stop && !should_exit) {
-            // Check if we have new frame data from LÖVE
+            // Check if we have new frame data
             if (shared_data->magic != MAGIC_NUMBER) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
@@ -187,50 +203,44 @@ public:
         if (!data || data->magic != MAGIC_NUMBER) {
             return;
         }
-        
+
         // Convert format based on what LÖVE provided
         NDIlib_video_frame_v2_t video_frame;
         memset(&video_frame, 0, sizeof(video_frame));
-        
+
         video_frame.xres = data->width;
         video_frame.yres = data->height;
         video_frame.frame_rate_N = 60000; // NTSC (like professional)
         video_frame.frame_rate_D = 1001;  // 59.94 fps
         video_frame.picture_aspect_ratio = (float)data->width / (float)data->height;
         video_frame.frame_format_type = NDIlib_frame_format_type_progressive;
-        
-        // Set format and stride based on LÖVE's format
-        if (data->format == 0) { // RGBA from LÖVE
-            // Convert RGBA to BGRA for NDI
-            uint8_t* bgra_buffer = new uint8_t[data->width * data->height * 4];
-            convert_rgba_to_bgra(data->pixel_data, bgra_buffer, data->width * data->height);
-            
-            video_frame.FourCC = NDIlib_FourCC_type_BGRA;
-            video_frame.line_stride_in_bytes = data->width * 4;
-            video_frame.p_data = bgra_buffer;
-            
-            // Timing (critical for frame visibility)
-            video_frame.timecode = data->timestamp_us * 10; // Convert to 100ns intervals
-            video_frame.timestamp = data->timestamp_us;
-            video_frame.p_metadata = nullptr;
-            
-            // Send frame
-            NDIlib_send_send_video_v2(ndi_sender, &video_frame);
-            
-            delete[] bgra_buffer;
-        } else if (data->format == 1) { // BGRA from LÖVE
-            video_frame.FourCC = NDIlib_FourCC_type_BGRA;
-            video_frame.line_stride_in_bytes = data->width * 4;
-            video_frame.p_data = data->pixel_data;
-            
-            // Timing (critical for frame visibility)
-            video_frame.timecode = data->timestamp_us * 10;
-            video_frame.timestamp = data->timestamp_us;
-            video_frame.p_metadata = nullptr;
-            
-            // Send frame
-            NDIlib_send_send_video_v2(ndi_sender, &video_frame);
+
+        // Source pointer into the currently active shared buffer
+        const uint32_t idx = data->active_index & 1U;
+        const uint8_t* base = reinterpret_cast<const uint8_t*>(shared_data);
+        const uint8_t* src = base + data->buf_offset[idx];
+        const size_t bytes = static_cast<size_t>(data->data_size);
+
+        // Always copy to a local buffer to avoid races while sending
+        std::unique_ptr<uint8_t[]> send_buf(new uint8_t[data->width * data->height * 4]);
+        if (data->format == 0) { // RGBA -> BGRA
+            convert_rgba_to_bgra(const_cast<uint8_t*>(src), send_buf.get(), data->width * data->height);
+        } else {
+            // BGRA: copy as-is
+            memcpy(send_buf.get(), src, bytes);
         }
+
+        video_frame.FourCC = NDIlib_FourCC_type_BGRA;
+        video_frame.line_stride_in_bytes = data->width * 4;
+        video_frame.p_data = send_buf.get();
+
+        // Timing
+        video_frame.timecode = data->timestamp_us * 10;
+        video_frame.timestamp = data->timestamp_us;
+        video_frame.p_metadata = nullptr;
+
+        // Send frame
+        NDIlib_send_send_video_v2(ndi_sender, &video_frame);
     }
     
     void convert_rgba_to_bgra(uint8_t* rgba_data, uint8_t* bgra_data, int pixel_count) {

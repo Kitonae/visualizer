@@ -207,7 +207,8 @@ local function execute_command(cmd)
         M.log("  shader - Shader commands (list, switch <num>)")
         M.log("  fps - Show current FPS")
         M.log("  version - Show version info")
-        M.log("  resolution - Resolution commands (get, set <width> <height>)")
+        M.log("  resolution - Window resolution (get, set <width> <height>)")
+        M.log("  render - Render/stream resolution (get, set <width> <height> | match)")
         M.log("  quit - Quit application")
         
     elseif command == "clear" then
@@ -336,7 +337,7 @@ local function execute_command(cmd)
         if #args == 0 or args[1] == "get" then
             local width = love.graphics.getWidth()
             local height = love.graphics.getHeight()
-            M.log("Current resolution: " .. width .. "x" .. height)
+            M.log("Window resolution: " .. width .. "x" .. height)
         elseif args[1] == "set" and args[2] and args[3] then
             local width = tonumber(args[2])
             local height = tonumber(args[3])
@@ -354,11 +355,7 @@ local function execute_command(cmd)
                     end)
                     
                     if success then
-                        M.success("Resolution changed to " .. width .. "x" .. height)
-                        -- Update shader resolution if it has the uniform
-                        if shader and shader:hasUniform("resolution") then
-                            shader:send("resolution", {width, height})
-                        end
+                        M.success("Window resolution changed to " .. width .. "x" .. height)
                     else
                         M.error("Failed to change resolution")
                     end
@@ -368,6 +365,46 @@ local function execute_command(cmd)
             end
         else
             M.error("Usage: resolution [get] or resolution set <width> <height>")
+        end
+
+    elseif command == "render" then
+        if #args == 0 or args[1] == "get" then
+            local w = _G.render_width or 0
+            local h = _G.render_height or 0
+            M.log("Render/stream resolution: " .. w .. "x" .. h)
+        elseif args[1] == "match" or args[1] == "match-window" then
+            if _G.match_render_to_window then
+                _G.match_render_to_window()
+                M.success("Render/stream resolution matched to window")
+            else
+                M.error("Render controls unavailable")
+            end
+        elseif args[1] == "set" then
+            local w, h
+            if args[2] and args[2]:find("x") then
+                local a,b = args[2]:match("^(%d+)%D+(%d+)$")
+                w = tonumber(a); h = tonumber(b)
+            else
+                w = tonumber(args[2]); h = tonumber(args[3])
+            end
+            if w and h and w > 0 and h > 0 then
+                if w < 100 or h < 100 then
+                    M.error("Render resolution too small. Minimum: 100x100")
+                elseif w > 7680 or h > 4320 then
+                    M.error("Render resolution too large. Maximum: 7680x4320")
+                else
+                    if _G.set_render_size then
+                        _G.set_render_size(w, h)
+                        M.success("Render/stream resolution set to " .. w .. "x" .. h)
+                    else
+                        M.error("Render controls unavailable")
+                    end
+                end
+            else
+                M.error("Usage: render set <width> <height> or render set <WxH>")
+            end
+        else
+            M.error("Usage: render [get|match|set <width> <height>|set <WxH>]")
         end
         
     elseif command == "quit" then

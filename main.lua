@@ -97,6 +97,17 @@ function love.load()
     }
     currentShaderIndex = 5 -- Start with mono lines (index shifted by 'None')
 
+    -- Offscreen render/stream resolution (independent of window size)
+    render_sizes = {
+        {1920, 1080},
+        {1280, 720},
+        {1600, 900},
+        {2560, 1440}
+    }
+    render_size_index = 1
+    render_width, render_height = render_sizes[render_size_index][1], render_sizes[render_size_index][2]
+    render_canvas = love.graphics.newCanvas(render_width, render_height)
+
     -- Defer initialization steps to loading sequence
     ndi_enabled = false
     ndi_source_name = "LÖVE Visualizer"
@@ -106,6 +117,7 @@ function love.load()
     loading.active = true
     loading.step = 0
     loading.start_time = love.timer.getTime()
+
 end
 
 function loadCurrentShader()
@@ -116,9 +128,9 @@ function loadCurrentShader()
     end
     shader = love.graphics.newShader(shaderInfo.file)
     
-    -- Set initial resolution
+    -- Set initial resolution to offscreen render size
     if shader:hasUniform("resolution") then
-        shader:send("resolution", {love.graphics.getWidth(), love.graphics.getHeight()})
+        shader:send("resolution", {render_width, render_height})
     end
     
     -- Initialize mouse position for shaders that need it
@@ -220,9 +232,9 @@ function love.update(dt)
         shader:send("time", t)
     end
     
-    -- Update resolution in case window is resized
+    -- Keep shader in sync with offscreen render resolution
     if shader and shader:hasUniform("resolution") then
-        shader:send("resolution", {love.graphics.getWidth(), love.graphics.getHeight()})
+        shader:send("resolution", {render_width, render_height})
     end
     
     -- Update console
@@ -235,69 +247,67 @@ function love.update(dt)
 end
 
 
+local function ensureRenderCanvas()
+    if not render_canvas or render_canvas:getWidth() ~= render_width or render_canvas:getHeight() ~= render_height then
+        if render_canvas then render_canvas:release() end
+        render_canvas = love.graphics.newCanvas(render_width, render_height)
+        print("Render canvas recreated for resolution: " .. render_width .. "x" .. render_height)
+        -- Update shader resolution to match new canvas
+        if shader and shader:hasUniform("resolution") then
+            shader:send("resolution", {render_width, render_height})
+        end
+    end
+end
+
 function love.draw()
     local shaderInfo = shaders[currentShaderIndex]
     
-    -- Function to render the main content
-    local function renderContent()
+    -- Function to render the main content into the current canvas using offscreen size
+    local function renderContent(offW, offH)
         -- Draw forest background if shader supports transparency (preserve aspect ratio; no stretching)
         if shaderInfo.hasBackground and backgroundImage then
             love.graphics.setColor(1, 1, 1, 1)
-            local winW, winH = love.graphics.getWidth(), love.graphics.getHeight()
             local imgW, imgH = backgroundImage:getWidth(), backgroundImage:getHeight()
-            local scale = math.min(winW / imgW, winH / imgH)
+            local scale = math.min(offW / imgW, offH / imgH)
             local drawW, drawH = imgW * scale, imgH * scale
-            local x = (winW - drawW) * 0.5
-            local y = (winH - drawH) * 0.5
+            local x = (offW - drawW) * 0.5
+            local y = (offH - drawH) * 0.5
             love.graphics.draw(backgroundImage, x, y, 0, scale, scale)
         end
         
         -- Draw shader
         if shader then
             love.graphics.setShader(shader)
-            love.graphics.rectangle("fill", 0, 0, love.graphics.getWidth(), love.graphics.getHeight())
+            love.graphics.rectangle("fill", 0, 0, offW, offH)
             love.graphics.setShader()
         end
     end
-    
-    -- Optional: draw captured window beneath shader if available
+
+    ensureRenderCanvas()
+
+    -- Render full scene to offscreen canvas
+    love.graphics.setCanvas(render_canvas)
+    love.graphics.clear(0, 0, 0, 1)
     if capture and capture.is_ready() then
-        capture.draw(0, 0, love.graphics.getWidth(), love.graphics.getHeight())
+        capture.draw(0, 0, render_width, render_height)
+    end
+    renderContent(render_width, render_height)
+    love.graphics.setCanvas()
+
+    -- Send frame via NDI if streaming (from offscreen canvas)
+    if ndi_enabled and ndi.is_streaming() then
+        ndi.send_frame(render_canvas)
     end
 
-    -- Render shader content on top
-    renderContent()
-    
-    -- Send frame via NDI if streaming
-    if ndi_enabled and ndi.is_streaming() then
-        local w, h = love.graphics.getWidth(), love.graphics.getHeight()
-        
-        -- Create or recreate NDI canvas if size changed
-        if not _G.ndi_capture_canvas or 
-           _G.ndi_capture_canvas:getWidth() ~= w or 
-           _G.ndi_capture_canvas:getHeight() ~= h then
-            
-            -- Release old canvas if it exists
-            if _G.ndi_capture_canvas then
-                _G.ndi_capture_canvas:release()
-            end
-            
-            -- Create new canvas with current window size
-            _G.ndi_capture_canvas = love.graphics.newCanvas(w, h)
-            print("NDI canvas recreated for resolution: " .. w .. "x" .. h)
-        end
-        
-        -- Render to NDI canvas (match on-screen: capture first, then shader)
-        love.graphics.setCanvas(_G.ndi_capture_canvas)
-        love.graphics.clear()
-        if capture and capture.is_ready() then
-            capture.draw(0, 0, w, h)
-        end
-        renderContent()
-        love.graphics.setCanvas()
-        
-        -- Send frame via shared memory to C++ NDI sender
-        ndi.send_frame(_G.ndi_capture_canvas)
+    -- Draw the offscreen canvas to the window, preserving aspect ratio (letterbox)
+    do
+        local winW, winH = love.graphics.getWidth(), love.graphics.getHeight()
+        local scale = math.min(winW / render_width, winH / render_height)
+        local drawW, drawH = render_width * scale, render_height * scale
+        local x = (winW - drawW) * 0.5
+        local y = (winH - drawH) * 0.5
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.draw(render_canvas, x, y, 0, scale, scale)
     end
 
     -- Draw UI (only on screen, not in NDI stream)
@@ -305,6 +315,10 @@ function love.draw()
     love.graphics.print("Current: " .. shaderInfo.name, 10, 10)
     love.graphics.setColor(1, 1, 1, 0.8)  -- Reset to white for other text
     love.graphics.print("Press [Tab] to switch shaders, [Q] to quit, [`] for console", 10, 30)
+    local winW, winH = love.graphics.getWidth(), love.graphics.getHeight()
+    love.graphics.print(string.format(
+        "Render: %dx%d ([ and ] to change, M to match window) | Window: %dx%d",
+        render_width, render_height, winW, winH), 10, 110)
     if capture and capture.is_ready() then
         love.graphics.print("Capture: READY (Press [P] to stop)", 10, 90)
     else
@@ -396,7 +410,7 @@ function love.draw()
     love.graphics.setColor(1, 1, 1, 0.8)
     for i, s in ipairs(shaders) do
         local prefix = (i == currentShaderIndex) and "> " or "  "
-        love.graphics.print(prefix .. i .. ". " .. s.name, 10, 110 + i * 20)
+        love.graphics.print(prefix .. i .. ". " .. s.name, 10, 130 + i * 20)
     end
     
     -- Draw console last (on top)
@@ -418,7 +432,8 @@ function love.draw()
             local drawW, drawH = imgW * scale, imgH * scale
             local x = (w - drawW) * 0.5
             local y = (h - drawH) * 0.5
-            love.graphics.setColor(1, 1, 1, 1)
+            -- Fade background image with overlay to avoid a hard cut
+            love.graphics.setColor(1, 1, 1, fade_ratio)
             love.graphics.draw(backgroundImage, x, y, 0, scale, scale)
         end
 
@@ -485,6 +500,29 @@ function love.keypressed(key)
             end
         end
     end
+    if key == "m" then
+        local w, h = love.graphics.getWidth(), love.graphics.getHeight()
+        if _G.set_render_size then
+            _G.set_render_size(w, h)
+        else
+            -- Fallback if globals are missing
+            render_width, render_height = w, h
+            ensureRenderCanvas()
+        end
+        console.info(string.format("Render size matched to window: %dx%d", w, h))
+    end
+    if key == "[" then
+        render_size_index = ((render_size_index - 2) % #render_sizes) + 1
+        render_width, render_height = render_sizes[render_size_index][1], render_sizes[render_size_index][2]
+        ensureRenderCanvas()
+        console.info(string.format("Render size: %dx%d", render_width, render_height))
+    end
+    if key == "]" then
+        render_size_index = (render_size_index % #render_sizes) + 1
+        render_width, render_height = render_sizes[render_size_index][1], render_sizes[render_size_index][2]
+        ensureRenderCanvas()
+        console.info(string.format("Render size: %dx%d", render_width, render_height))
+    end
     if key == "p" then
         if capture and capture.is_ready() then
             capture.stop()
@@ -516,13 +554,25 @@ function love.keyreleased(key)
 end
 
 function love.resize(w, h)
-    -- Update shader resolution uniform
+    -- Offscreen render size is independent; only on-screen scaling changes
+    print("Window resized to " .. w .. "x" .. h .. " (render/stream unchanged: " .. render_width .. "x" .. render_height .. ")")
+end
+
+-- Expose helpers for console commands
+function set_render_size(w, h)
+    w = math.floor(tonumber(w) or render_width)
+    h = math.floor(tonumber(h) or render_height)
+    if w < 100 or h < 100 then return end
+    render_width, render_height = w, h
+    ensureRenderCanvas()
     if shader and shader:hasUniform("resolution") then
-        shader:send("resolution", {w, h})
+        shader:send("resolution", {render_width, render_height})
     end
-    
-    -- NDI canvas will be automatically recreated on next frame
-    print("Window resized to " .. w .. "x" .. h .. " - NDI will adjust automatically")
+end
+
+function match_render_to_window()
+    local w, h = love.graphics.getWidth(), love.graphics.getHeight()
+    set_render_size(w, h)
 end
 
 -- Ensure cleanup when the window is closed via OS controls

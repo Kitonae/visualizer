@@ -227,6 +227,7 @@ end
 
 function M.stop()
     if image then image:release(); image = nil end
+    if last_image_data then last_image_data:release(); last_image_data = nil end
     last_frame = 0; last_w = 0; last_h = 0
     if shared_data and shared_data ~= ffi.cast("uint8_t*", 0) then
         ffi.C.UnmapViewOfFile(shared_data); shared_data = nil
@@ -264,25 +265,25 @@ function M.update()
     local h = tonumber(header.height)
     local size = tonumber(header.data_size)
     local fmt = tonumber(header.format) -- 0 RGBA, 1 BGRA
-    -- Prepare ByteData, copy pixels
-    local bytes = love.data.newByteData(size)
-    ffi.copy(ffi.cast("uint8_t*", bytes:getPointer()), header.pixel_data, size)
-    -- If BGRA, convert to RGBA in-place (simple swizzle). This is O(n), acceptable for scaffold.
+    -- Ensure we have a reusable ImageData backing store of the right size
+    if (not last_image_data) or w ~= last_w or h ~= last_h then
+        last_image_data = love.image.newImageData(w, h, "rgba8")
+        if image then image:release() end
+        image = love.graphics.newImage(last_image_data, { mipmaps = false, linear = true })
+        last_w, last_h = w, h
+    end
+
+    -- Copy pixels directly into the ImageData buffer to avoid per-frame allocations
+    local dst = ffi.cast("uint8_t*", last_image_data:getPointer())
+    ffi.copy(dst, header.pixel_data, size)
+    -- If BGRA, convert to RGBA in-place (simple swizzle)
     if fmt == 1 then
-        local p = ffi.cast("uint8_t*", bytes:getPointer())
         for i = 0, size-1, 4 do
-            local b = p[i]; local r = p[i+2]; p[i] = r; p[i+2] = b
+            local b = dst[i]; local r = dst[i+2]; dst[i] = r; dst[i+2] = b
         end
     end
-    local imgData = love.image.newImageData(w, h, "rgba8", bytes)
-    last_image_data = imgData
-    if (not image) or w ~= last_w or h ~= last_h then
-        if image then image:release() end
-        image = love.graphics.newImage(imgData, { mipmaps = false, linear = true })
-        last_w, last_h = w, h
-    else
-        image:replacePixels(imgData)
-    end
+
+    image:replacePixels(last_image_data)
     last_frame = header.frame_number
     if last_frame == 1 then
         append_capture_log(string.format("First frame received: %dx%d frame=%d", w, h, last_frame))
