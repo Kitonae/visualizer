@@ -14,12 +14,25 @@ local function now_ts()
 end
 
 local function ensure_dir()
+    -- Ensure the "logs" directory exists in both LÖVE and plain Lua contexts.
     if love and love.filesystem and love.filesystem.createDirectory then
+        -- In LÖVE: create within the save directory
         love.filesystem.createDirectory("logs")
-    else
-        -- best-effort for non-LÖVE contexts
-        os.execute("mkdir -p logs >nul 2>&1 || true")
+        return
     end
+
+    -- Plain Lua fallback: create an OS directory named "logs" next to the script
+    local is_windows = package.config and package.config:sub(1,1) == "\\"
+    local cmd
+    if is_windows then
+        -- Windows `mkdir` creates intermediate dirs if needed; avoid POSIX flags
+        cmd = 'if not exist "logs" mkdir "logs"'
+    else
+        -- POSIX systems
+        cmd = 'mkdir -p "logs"'
+    end
+    -- Best-effort; ignore exit code
+    os.execute(cmd)
 end
 
 local function rotate_if_needed()

@@ -20,6 +20,7 @@ copy console.lua temp_build\
 copy conf.lua temp_build\
 copy ndi.lua temp_build\
 copy forest.png temp_build\
+copy logo.png temp_build\
 xcopy shaders temp_build\shaders\ /E /I
 copy Processing.NDI.Lib.Runtime.x64.dll temp_build\
 copy Processing.NDI.Lib.x64.dll temp_build\

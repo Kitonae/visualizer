@@ -15,7 +15,7 @@ ffi.cdef[[
     int UnmapViewOfFile(void* lpBaseAddress);
     int CloseHandle(void* hObject);
     uint32_t GetLastError();
-    
+
     // Performance Counters API
     typedef void* PDH_HQUERY;
     typedef void* PDH_HCOUNTER;
@@ -38,7 +38,7 @@ ffi.cdef[[
     uint32_t PdhGetFormattedCounterValue(PDH_HCOUNTER hCounter, uint32_t dwFormat, uint32_t* lpdwType, PDH_FMT_COUNTERVALUE* pValue);
     uint32_t PdhCloseQuery(PDH_HQUERY hQuery);
     uint32_t PdhExpandWildCardPathA(const char* szDataSource, const char* szWildCardPath, char* mszExpandedPathList, uint32_t* pcchPathListLength, uint32_t dwFlags);
-    
+
     // Process management
     typedef struct {
         uint32_t cb;
@@ -136,7 +136,6 @@ local network_stats = {
     avg_bandwidth = 0
 }
 
--- Network interface monitoring
 local network_interface_stats = {
     last_bytes_sent = 0,
     last_check_time = 0,
@@ -153,9 +152,65 @@ local perf_counters = {
     initialized = false
 }
 
+-- Try switching to per-interface wildcard counters if the _Total counter misbehaves
+local function switch_to_wildcard_counters()
+    if not perf_counters.query then return false end
+    -- Clear single counter usage
+    perf_counters.counter = nil
+    perf_counters.counters = {}
+
+    local function try_add_counter(path)
+        local c = ffi.new("PDH_HCOUNTER[1]")
+        local st
+        local ok_call, ret = pcall(function()
+            return pdh.PdhAddEnglishCounterA(perf_counters.query, path, 0, c)
+        end)
+        if ok_call then
+            st = ret
+        else
+            st = pdh.PdhAddCounterA(perf_counters.query, path, 0, c)
+        end
+        if st == 0 then
+            table.insert(perf_counters.counters, c[0])
+            return true
+        end
+        return false
+    end
+
+    local function add_wildcard(wildcard)
+        local needed = ffi.new("uint32_t[1]", 0)
+        pdh.PdhExpandWildCardPathA(nil, wildcard, nil, needed, 0)
+        local sz = tonumber(needed[0])
+        if not sz or sz == 0 then return false end
+        local buf = ffi.new("char[?]", sz)
+        local st = pdh.PdhExpandWildCardPathA(nil, wildcard, buf, needed, 0)
+        if st ~= 0 then return false end
+        local i = 0
+        local count = 0
+        while true do
+            local s = ffi.string(buf + i)
+            if #s == 0 then break end
+            if try_add_counter(s) then count = count + 1 end
+            i = i + #s + 1
+        end
+        return count > 0
+    end
+
+    -- Use single leading backslash in PDH counter path (local machine)
+    if add_wildcard("\\Network Interface(*)\\Bytes Total/sec") then
+        if debug_output then print("PDH: Switched to per-interface Bytes Total/sec") end
+        return true
+    end
+    if add_wildcard("\\Network Interface(*)\\Bytes Sent/sec") then
+        if debug_output then print("PDH: Switched to per-interface Bytes Sent/sec") end
+        return true
+    end
+    return false
+end
+
 local SHARED_MEMORY_NAME = "LOVE_NDI_SHARED_FRAME"
 local MAGIC_NUMBER = 0xDEADBEEF
-local NDI_SENDER_PATH = "ndi_sender.exe"
+local NDI_SENDER_PATH = "build/ndi_sender.exe"
 
 function M.init_performance_counters()
     if perf_counters.initialized then
@@ -291,7 +346,20 @@ function M.get_network_interface_bytes()
         -- Collect current data
         local status = pdh.PdhCollectQueryData(perf_counters.query)
         if status ~= 0 then
-            logger.warn("PDH: CollectQueryData failed status=" .. tostring(status) .. ", enabling fallback")
+            -- Try switching to per-interface counters once before giving up
+            logger.warn("PDH: CollectQueryData failed status=" .. tostring(status) .. ", retrying with per-interface counters")
+            local switched = switch_to_wildcard_counters()
+            if switched then
+                -- Take two samples as these are rate counters
+                local _ = pdh.PdhCollectQueryData(perf_counters.query)
+                love.timer.sleep(0.2)
+                status = pdh.PdhCollectQueryData(perf_counters.query)
+            else
+                logger.warn("PDH: Could not switch to per-interface counters (wildcard expansion failed)")
+            end
+        end
+        if status ~= 0 then
+            logger.warn("PDH: CollectQueryData still failing status=" .. tostring(status) .. ", enabling fallback")
             M.fallback_to_simple_monitoring()
             return 0
         end
@@ -383,7 +451,7 @@ function M.update_network_interface_stats()
         network_stats.avg_bandwidth = #network_stats.bandwidth_history > 0 and (sum / #network_stats.bandwidth_history) or 0
         
         network_interface_stats.last_check_time = current_time
-        logger.debug(string.format("PDH: bandwidth %.2f B/s (%.2f MB/s)", bandwidth, bandwidth / (1024*1024)))
+        logger.debug(string.format("PDH: bandwidth %.2f B/s (%.2f Mbps)", bandwidth, (bandwidth * 8) / 1e6))
     end
 end
 
@@ -424,14 +492,22 @@ function M.start_ndi_process()
     M.kill_existing_ndi_processes()
     
     local success, result = pcall(function()
-        -- Check if NDI sender executable exists
-        local file = io.open(NDI_SENDER_PATH, "r")
-        if not file then
-            error("NDI sender executable not found at: " .. NDI_SENDER_PATH)
+        -- Resolve NDI sender executable (try common locations)
+        local candidates = {
+            NDI_SENDER_PATH,
+            "build/ndi_sender.exe",
+            "ndi_sender.exe"
+        }
+        local resolved = nil
+        for _, p in ipairs(candidates) do
+            local f = io.open(p, "r")
+            if f then f:close(); resolved = p; break end
         end
-        file:close()
+        if not resolved then
+            error("NDI sender executable not found. Tried: " .. table.concat(candidates, ", "))
+        end
         
-        print("Starting NDI sender process: " .. NDI_SENDER_PATH)
+        print("Starting NDI sender process: " .. resolved)
         
         -- Set up process startup info for headless operation
         local startup_info = ffi.new("STARTUPINFOA")
@@ -442,7 +518,7 @@ function M.start_ndi_process()
         process_info = ffi.new("PROCESS_INFORMATION")
         
         -- Create the process
-        local command_line = ffi.new("char[?]", #NDI_SENDER_PATH + 1, NDI_SENDER_PATH)
+        local command_line = ffi.new("char[?]", #resolved + 1, resolved)
         local result = ffi.C.CreateProcessA(
             nil,  -- lpApplicationName
             command_line,  -- lpCommandLine (now properly converted)
@@ -756,6 +832,15 @@ end
 
 function M.start_streaming(source_name)
     source_name = source_name or "LÖVE Visualizer"
+    -- Initialize logging first so failures are captured and path is visible
+    logger.init("logs/ndi.log")
+    logger.set_level(debug_output and "debug" or "info")
+    if love and love.filesystem and love.filesystem.getSaveDirectory then
+        local path_msg = string.format("NDI logs at: %s/%s", love.filesystem.getSaveDirectory(), "logs/ndi.log")
+        print(path_msg)
+        logger.info(path_msg)
+    end
+
     if M.initialize() then
         -- Initialize performance counters for real-time network monitoring
         logger.init("logs/ndi.log")
@@ -824,8 +909,9 @@ function M.get_network_stats()
         frames_sent = network_stats.frames_sent,
         bytes_sent = network_stats.bytes_sent,
         current_fps = network_stats.current_fps,
-        bandwidth_mbps = network_stats.avg_bandwidth / (1024 * 1024),
-        max_bandwidth_mbps = network_stats.max_bandwidth / (1024 * 1024),
+        -- Convert bytes/sec to megabits/sec using decimal units
+        bandwidth_mbps = (network_stats.avg_bandwidth * 8) / 1e6,
+        max_bandwidth_mbps = (network_stats.max_bandwidth * 8) / 1e6,
         bandwidth_history = network_stats.bandwidth_history,
         uptime = start_time and (love.timer.getTime() - start_time) or 0,
         receiver_count = M.get_receiver_count()

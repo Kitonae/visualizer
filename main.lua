@@ -49,11 +49,43 @@ if not ndi_load_success then
     }
 end
 
+-- Load capture module (shared memory Windows Graphics Capture)
+local capture_load_success, capture_load_error = pcall(function()
+    return require("capture")
+end)
+
+local capture
+if capture_load_success then
+    capture = capture_load_error
+else
+    print("Failed to load capture module: " .. tostring(capture_load_error))
+    capture = {
+        start = function() return false end,
+        stop = function() end,
+        is_ready = function() return false end,
+        update = function() end,
+        draw = function() end,
+        get_status = function() return "Unavailable" end
+    }
+end
+
+-- Loading screen state
+local loading = {
+    active = true,
+    step = 0,
+    message = "Starting...",
+    start_time = 0,
+    fading = false,
+    fade_t = 0,
+    fade_duration = 0.6,
+}
+
 function love.load()
     print("Starting LÖVE application...")
-    
+
     -- List of available shaders
     shaders = {
+        {name = "None", file = nil, hasBackground = false},
         {name = "Kaleidoscope", file = "shaders/kaleidoscope.frag", hasBackground = false},
         {name = "Water Waves", file = "shaders/waves.frag", hasBackground = false},
         {name = "Animated Lines", file = "shaders/lines.frag", hasBackground = false},
@@ -63,66 +95,25 @@ function love.load()
         {name = "Tunnel Purple", file = "shaders/tunnel_purple.frag", hasBackground = false},
         {name = "Falling Stars", file = "shaders/falling_stars.frag", hasBackground = false}
     }
-    
-    currentShaderIndex = 4 -- Start with mono lines (update to 4 or 5 if you want to start with new shaders)
-    
-    -- Initialize console first so we can log errors
-    local console_success, console_error = pcall(function()
-        console.init()
-    end)
-    
-    if not console_success then
-        print("Console initialization failed: " .. tostring(console_error))
-    else
-        print("Console initialized successfully")
-    end
-    
-    -- Load forest background image
-    local bg_success, bg_error = pcall(function()
-        backgroundImage = love.graphics.newImage("forest.png")
-    end)
-    
-    if not bg_success then
-        print("Failed to load background image: " .. tostring(bg_error))
-        console.error("Failed to load background image: " .. tostring(bg_error))
-    else
-        print("Background image loaded successfully")
-    end
-    
-    -- NDI initialization
+    currentShaderIndex = 5 -- Start with mono lines (index shifted by 'None')
+
+    -- Defer initialization steps to loading sequence
     ndi_enabled = false
     ndi_source_name = "LÖVE Visualizer"
     ndi_groups = nil
-    
-    -- Try to initialize NDI
-    local ndi_success, ndi_error = pcall(function()
-        return ndi.initialize()
-    end)
-    
-    if ndi_success and ndi_error then -- ndi_error is actually the return value when pcall succeeds
-        print("NDI initialized successfully")
-        console.success("NDI initialized successfully")
-        ndi_enabled = true
-    else
-        local error_msg = ndi_success and "NDI initialization returned false" or tostring(ndi_error)
-        print("NDI initialization failed - streaming will be disabled: " .. error_msg)
-        console.warn("NDI initialization failed - streaming will be disabled: " .. error_msg)
-    end
-    
-    -- Load shader
-    local shader_success, shader_error = pcall(loadCurrentShader)
-    if not shader_success then
-        print("Failed to load shader: " .. tostring(shader_error))
-        console.error("Failed to load shader: " .. tostring(shader_error))
-    else
-        print("Shader loaded successfully")
-    end
-    
-    print("LÖVE application startup complete")
+    backgroundImage = nil
+    logoImage = nil
+    loading.active = true
+    loading.step = 0
+    loading.start_time = love.timer.getTime()
 end
 
 function loadCurrentShader()
     local shaderInfo = shaders[currentShaderIndex]
+    if not shaderInfo.file then
+        shader = nil
+        return
+    end
     shader = love.graphics.newShader(shaderInfo.file)
     
     -- Set initial resolution
@@ -163,19 +154,84 @@ end
 
 
 function love.update(dt)
+    -- Loading sequence: run step-by-step over frames so the loading screen is visible
+    if loading.active then
+        if loading.step == 0 then
+            loading.message = "Initializing console..."
+            local ok, err = pcall(function() console.init() end)
+            if not ok then print("Console initialization failed: " .. tostring(err)) end
+            loading.step = 1
+            return
+        elseif loading.step == 1 then
+            loading.message = "Loading assets..."
+            local ok, err = pcall(function()
+                backgroundImage = love.graphics.newImage("forest.png")
+                -- Optional logo (shown on loading overlay if present)
+                logoImage = love.graphics.newImage("logo.png")
+            end)
+            if not ok then
+                print("Failed to load background image: " .. tostring(err))
+                if console and console.error then console.error("Failed to load background image: " .. tostring(err)) end
+            end
+            loading.step = 2
+            return
+        elseif loading.step == 2 then
+            loading.message = "Initializing NDI..."
+            local ndi_success, ndi_error = pcall(function() return ndi.initialize() end)
+            if ndi_success and ndi_error then
+                print("NDI initialized successfully")
+                if console and console.success then console.success("NDI initialized successfully") end
+                ndi_enabled = true
+            else
+                local error_msg = ndi_success and "NDI initialization returned false" or tostring(ndi_error)
+                print("NDI initialization failed - streaming will be disabled: " .. error_msg)
+                if console and console.warn then console.warn("NDI initialization failed - streaming will be disabled: " .. error_msg) end
+            end
+            loading.step = 3
+            return
+        elseif loading.step == 3 then
+            loading.message = "Loading shader..."
+            local ok, err = pcall(loadCurrentShader)
+            if not ok then
+                print("Failed to load shader: " .. tostring(err))
+                if console and console.error then console.error("Failed to load shader: " .. tostring(err)) end
+            end
+            loading.step = 4
+            return
+        else
+            loading.active = false
+            loading.fading = true
+            loading.fade_t = 0
+            print("LÖVE application startup complete")
+        end
+    end
+
+    -- Advance fade-out if active
+    if loading.fading then
+        loading.fade_t = math.min(loading.fade_t + dt, loading.fade_duration)
+        if loading.fade_t >= loading.fade_duration then
+            loading.fading = false
+        end
+    end
+
     -- Pass time to the shader for animation
     local t = love.timer.getTime()
-    if shader:hasUniform("time") then
+    if shader and shader:hasUniform("time") then
         shader:send("time", t)
     end
     
     -- Update resolution in case window is resized
-    if shader:hasUniform("resolution") then
+    if shader and shader:hasUniform("resolution") then
         shader:send("resolution", {love.graphics.getWidth(), love.graphics.getHeight()})
     end
     
     -- Update console
     console.update(dt)
+
+    -- Update capture texture if active
+    if capture and capture.is_ready() then
+        capture.update()
+    end
 end
 
 
@@ -184,21 +240,32 @@ function love.draw()
     
     -- Function to render the main content
     local function renderContent()
-        -- Draw forest background if shader supports transparency
-        if shaderInfo.hasBackground then
+        -- Draw forest background if shader supports transparency (preserve aspect ratio; no stretching)
+        if shaderInfo.hasBackground and backgroundImage then
             love.graphics.setColor(1, 1, 1, 1)
-            love.graphics.draw(backgroundImage, 0, 0, 0, 
-                              love.graphics.getWidth() / backgroundImage:getWidth(), 
-                              love.graphics.getHeight() / backgroundImage:getHeight())
+            local winW, winH = love.graphics.getWidth(), love.graphics.getHeight()
+            local imgW, imgH = backgroundImage:getWidth(), backgroundImage:getHeight()
+            local scale = math.min(winW / imgW, winH / imgH)
+            local drawW, drawH = imgW * scale, imgH * scale
+            local x = (winW - drawW) * 0.5
+            local y = (winH - drawH) * 0.5
+            love.graphics.draw(backgroundImage, x, y, 0, scale, scale)
         end
         
         -- Draw shader
-        love.graphics.setShader(shader)
-        love.graphics.rectangle("fill", 0, 0, love.graphics.getWidth(), love.graphics.getHeight())
-        love.graphics.setShader()
+        if shader then
+            love.graphics.setShader(shader)
+            love.graphics.rectangle("fill", 0, 0, love.graphics.getWidth(), love.graphics.getHeight())
+            love.graphics.setShader()
+        end
     end
     
-    -- Render to screen
+    -- Optional: draw captured window beneath shader if available
+    if capture and capture.is_ready() then
+        capture.draw(0, 0, love.graphics.getWidth(), love.graphics.getHeight())
+    end
+
+    -- Render shader content on top
     renderContent()
     
     -- Send frame via NDI if streaming
@@ -235,6 +302,11 @@ function love.draw()
     love.graphics.print("Current: " .. shaderInfo.name, 10, 10)
     love.graphics.setColor(1, 1, 1, 0.8)  -- Reset to white for other text
     love.graphics.print("Press [Tab] to switch shaders, [Q] to quit, [`] for console", 10, 30)
+    if capture and capture.is_ready() then
+        love.graphics.print("Capture: READY (Press [P] to stop)", 10, 90)
+    else
+        love.graphics.print("Capture: OFF (Press [P] to start)", 10, 90)
+    end
     
     -- NDI status (basic info on left)
     if ndi_enabled then
@@ -256,9 +328,9 @@ function love.draw()
                 stats.frames_sent, stats.current_fps, stats.receiver_count), telemetry_x, 10)
             love.graphics.print(string.format("Data: %s", 
                 ndi.format_bytes(stats.bytes_sent)), telemetry_x, 30)
-            love.graphics.print(string.format("Bandwidth: %.1f MB/s", 
+            love.graphics.print(string.format("Bandwidth: %.1f Mbps", 
                 stats.bandwidth_mbps), telemetry_x, 50)
-            love.graphics.print(string.format("Peak: %.1f MB/s | Uptime: %.0fs", 
+            love.graphics.print(string.format("Peak: %.1f Mbps | Uptime: %.0fs", 
                 stats.max_bandwidth_mbps, stats.uptime), telemetry_x, 70)
             
             -- Draw network load graph (right side)
@@ -278,18 +350,21 @@ function love.draw()
                 
                 -- Graph title
                 love.graphics.setColor(1, 1, 1, 0.8)
-                love.graphics.print("Network Load (MB/s)", graph_x + 5, graph_y - 15)
+                love.graphics.print("Network Load (Mbps)", graph_x + 5, graph_y - 15)
                 
                 -- Draw graph lines
                 local max_value = math.max(stats.max_bandwidth_mbps, 1) -- Avoid division by zero
                 love.graphics.setColor(0, 1, 0, 0.8)
-                
+
                 for i = 2, #stats.bandwidth_history do
                     local x1 = graph_x + ((i - 2) / (#stats.bandwidth_history - 1)) * graph_width
                     local x2 = graph_x + ((i - 1) / (#stats.bandwidth_history - 1)) * graph_width
-                    
-                    local y1 = graph_y + graph_height - ((stats.bandwidth_history[i - 1] / (1024 * 1024)) / max_value) * graph_height
-                    local y2 = graph_y + graph_height - ((stats.bandwidth_history[i] / (1024 * 1024)) / max_value) * graph_height
+
+                    -- Convert bytes/sec to Mbps for plotting
+                    local mbps1 = (stats.bandwidth_history[i - 1] * 8) / 1e6
+                    local mbps2 = (stats.bandwidth_history[i] * 8) / 1e6
+                    local y1 = graph_y + graph_height - (mbps1 / max_value) * graph_height
+                    local y2 = graph_y + graph_height - (mbps2 / max_value) * graph_height
                     
                     love.graphics.line(x1, y1, x2, y2)
                 end
@@ -318,11 +393,53 @@ function love.draw()
     love.graphics.setColor(1, 1, 1, 0.8)
     for i, s in ipairs(shaders) do
         local prefix = (i == currentShaderIndex) and "> " or "  "
-        love.graphics.print(prefix .. i .. ". " .. s.name, 10, 90 + i * 20)
+        love.graphics.print(prefix .. i .. ". " .. s.name, 10, 110 + i * 20)
     end
     
     -- Draw console last (on top)
     console.draw()
+
+    -- Loading overlay (drawn on top of everything)
+    if loading.active or loading.fading then
+        local w, h = love.graphics.getWidth(), love.graphics.getHeight()
+        local fade_ratio = loading.fading and (1 - (loading.fade_t / loading.fade_duration)) or 1
+
+        -- Draw background image with a gentle zoom (cover, no stretching)
+        if backgroundImage then
+            local imgW, imgH = backgroundImage:getWidth(), backgroundImage:getHeight()
+            local baseScale = math.max(w / imgW, h / imgH)
+            local t = love.timer.getTime() - (loading.start_time or 0)
+            -- Zoom in up to +8% over ~6 seconds
+            local zoom = 1 + math.min(t / 6, 0.08)
+            local scale = baseScale * zoom
+            local drawW, drawH = imgW * scale, imgH * scale
+            local x = (w - drawW) * 0.5
+            local y = (h - drawH) * 0.5
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.draw(backgroundImage, x, y, 0, scale, scale)
+        end
+
+        -- Dim overlay
+        love.graphics.setColor(0, 0, 0, 0.7 * fade_ratio)
+        love.graphics.rectangle("fill", 0, 0, w, h)
+        love.graphics.setColor(1, 1, 1, fade_ratio)
+        -- Draw logo if available, bottom-right with margin (preserve aspect ratio)
+        if logoImage then
+            local imgW, imgH = logoImage:getWidth(), logoImage:getHeight()
+            local maxW, maxH = w * 0.25, h * 0.15 -- keep subtle on loading screen
+            local scale = math.min(maxW / imgW, maxH / imgH, 1)
+            local drawW, drawH = imgW * scale, imgH * scale
+            local margin = 20
+            local x = w - drawW - margin
+            local y = h - drawH - margin
+            love.graphics.draw(logoImage, x, y, 0, scale, scale)
+        end
+        local msg = loading.message or "Loading..."
+        local spinner = "|/-\\"
+        local idx = math.floor(love.timer.getTime() * 10) % #spinner + 1
+        local text = string.format("%s  %s", spinner:sub(idx, idx), msg)
+        love.graphics.print(text, w/2 - 80, h/2)
+    end
 end
 
 
@@ -338,6 +455,7 @@ function love.keypressed(key)
         if ndi_enabled then
             ndi.cleanup()  -- This will now stop the managed subprocess
         end
+        if capture then capture.stop() end
         love.event.quit() 
     end
     if key == "tab" then
@@ -362,6 +480,16 @@ function love.keypressed(key)
                 print("Failed to start NDI streaming")
                 console.error("Failed to start NDI streaming")
             end
+        end
+    end
+    if key == "p" then
+        if capture and capture.is_ready() then
+            capture.stop()
+            console.info("Capture stopped")
+        else
+            -- Start capture targeting PowerPoint Slide Show by default
+            local ok = capture.start("PowerPoint Slide Show")
+            if ok then console.success("Capture started") else console.error("Failed to start capture") end
         end
     end
     -- Number keys for direct shader selection
@@ -392,4 +520,10 @@ function love.resize(w, h)
     
     -- NDI canvas will be automatically recreated on next frame
     print("Window resized to " .. w .. "x" .. h .. " - NDI will adjust automatically")
+end
+
+-- Ensure cleanup when the window is closed via OS controls
+function love.quit()
+    if capture and capture.stop then capture.stop() end
+    if ndi and ndi.cleanup then ndi.cleanup() end
 end

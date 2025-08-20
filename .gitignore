@@ -107,7 +107,6 @@ ndi_test_output/
 *.zip
 *.tar
 *.gz
-*.7z
 *.rar
 
 # Documentation build
