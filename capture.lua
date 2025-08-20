@@ -36,6 +36,10 @@ ffi.cdef[[
     uint32_t GetExitCodeProcess(void* hProcess, uint32_t* lpExitCode);
 ]]
 
+-- Note on struct layout:
+-- The C++ helper uses #pragma pack(push, 1) for the header, so fields are tightly packed.
+-- LuaJIT FFI uses natural alignment, which would insert padding before a uint64_t.
+-- To ensure matching offsets, we split the 64-bit timestamp into two 32-bit fields.
 ffi.cdef[[
     typedef struct {
         uint32_t magic;           // 0xC0FFEE01 for validation
@@ -43,7 +47,8 @@ ffi.cdef[[
         uint32_t height;
         uint32_t format;          // 0=RGBA, 1=BGRA
         uint32_t frame_number;
-        uint64_t timestamp_us;
+        uint32_t timestamp_lo;    // low 32 bits of timestamp_us
+        uint32_t timestamp_hi;    // high 32 bits of timestamp_us
         uint32_t data_size;
         uint32_t reserved;
         uint8_t  pixel_data[1];

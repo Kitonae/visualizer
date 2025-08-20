@@ -287,9 +287,12 @@ function love.draw()
             print("NDI canvas recreated for resolution: " .. w .. "x" .. h)
         end
         
-        -- Render to NDI canvas
+        -- Render to NDI canvas (match on-screen: capture first, then shader)
         love.graphics.setCanvas(_G.ndi_capture_canvas)
         love.graphics.clear()
+        if capture and capture.is_ready() then
+            capture.draw(0, 0, w, h)
+        end
         renderContent()
         love.graphics.setCanvas()
         
