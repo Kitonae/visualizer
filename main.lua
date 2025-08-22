@@ -89,7 +89,7 @@ function love.load()
         {name = "Kaleidoscope", file = "shaders/kaleidoscope.frag", hasBackground = false},
         {name = "Water Waves", file = "shaders/waves.frag", hasBackground = false},
         {name = "Animated Lines", file = "shaders/lines.frag", hasBackground = false},
-        {name = "Mono Lines", file = "shaders/lines_mono.frag", hasBackground = true},
+        {name = "Mono Lines", file = "shaders/lines_mono.frag", hasBackground = false},
         {name = "Tunnel", file = "shaders/tunnel.frag", hasBackground = false},
         {name = "Nebula", file = "shaders/nebula.frag", hasBackground = false},
         {name = "Tunnel Purple", file = "shaders/tunnel_purple.frag", hasBackground = false},
@@ -117,7 +117,12 @@ function love.load()
         local ww = tonumber(settings_mod.get("window_width"))
         local wh = tonumber(settings_mod.get("window_height"))
         if ww and wh and ww > 0 and wh > 0 then
-            pcall(function() love.window.setMode(ww, wh) end)
+            pcall(function()
+                local _, _, flags = love.window.getMode()
+                flags = flags or {}
+                flags.resizable = true
+                love.window.setMode(ww, wh, flags)
+            end)
         end
     end
     render_canvas = love.graphics.newCanvas(render_width, render_height)

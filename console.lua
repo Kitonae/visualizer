@@ -388,9 +388,12 @@ local function execute_command(cmd)
                 elseif width > 7680 or height > 4320 then
                     M.error("Resolution too large. Maximum: 7680x4320")
                 else
-                    -- Set window size
+                    -- Set window size (preserve window flags such as resizable)
                     local success = pcall(function()
-                        love.window.setMode(width, height)
+                        local _, _, flags = love.window.getMode()
+                        flags = flags or {}
+                        flags.resizable = true
+                        love.window.setMode(width, height, flags)
                     end)
                     
                     if success then

@@ -65,8 +65,8 @@ vec4 effect(vec4 color, Image texture, vec2 texture_coords, vec2 screen_coords)
     col = mix(COL_BLACK, col, m);
     
     // transparent background
-    // return vec4(col, m);
+    return vec4(col, m);
 
     // black background
-    return vec4(col,1.0);
+    // return vec4(col,1.0);
 }

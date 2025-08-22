@@ -8,7 +8,7 @@ local defaults = {
     window_height = 1080,
     render_width = 1920,
     render_height = 1080,
-    capture_pool = 1,
+    capture_pool = 2,
     capture_memlog = 0,
     ndi_debug = false,
 }
