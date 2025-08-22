@@ -711,8 +711,8 @@ function M.send_frame(capture_canvas)
     local success, result = pcall(function()
         -- Cast to structure for header access
         local header = ffi.cast("SharedFrameData*", shared_data)
-        
-        -- Get image data from canvas
+
+        -- Get image data from canvas (GPU->CPU readback)
         local imageData = capture_canvas:newImageData()
         local width = capture_canvas:getWidth()
         local height = capture_canvas:getHeight()
@@ -751,11 +751,11 @@ function M.send_frame(capture_canvas)
         header.timestamp_us = timestamp_us
         header.data_size = data_size
 
-        -- Copy pixel data to the inactive buffer
-        local pixels = imageData:getString()
+        -- Copy pixel data to the inactive buffer without creating a Lua string
         local target_off = tonumber(header.buf_offset[next_index])
         local pixel_data_ptr = shared_data + target_off
-        ffi.copy(pixel_data_ptr, pixels, math.min(data_size, #pixels))
+        local src_ptr = ffi.cast("const uint8_t*", imageData:getPointer())
+        ffi.copy(pixel_data_ptr, src_ptr, data_size)
 
         -- Publish new active buffer first, then frame number last as commit
         header.active_index = next_index
@@ -783,6 +783,8 @@ function M.send_frame(capture_canvas)
                 frame_counter, width, height, timestamp_us))
         end
         
+        -- Explicitly release ImageData to free native memory sooner than GC
+        if imageData and imageData.release then pcall(function() imageData:release() end) end
         return true
     end)
     
@@ -852,6 +854,15 @@ function M.start_streaming(source_name)
     source_name = source_name or "LÖVE Visualizer"
     -- Initialize logging first so failures are captured and path is visible
     logger.init("logs/ndi.log")
+    do
+        local ok, settings_mod = pcall(function() return require("settings") end)
+        if ok and settings_mod then
+            local saved = settings_mod.get("ndi_debug")
+            if type(saved) == "boolean" then
+                debug_output = saved
+            end
+        end
+    end
     logger.set_level(debug_output and "debug" or "info")
     if love and love.filesystem and love.filesystem.getSaveDirectory then
         local path_msg = string.format("NDI logs at: %s/%s", love.filesystem.getSaveDirectory(), "logs/ndi.log")
@@ -939,6 +950,11 @@ end
 function M.set_debug_output(enabled)
     debug_output = enabled
     logger.set_level(enabled and "debug" or "info")
+    local ok, settings_mod = pcall(function() return require("settings") end)
+    if ok and settings_mod then
+        settings_mod.set("ndi_debug", enabled)
+        settings_mod.save()
+    end
     return debug_output
 end
 

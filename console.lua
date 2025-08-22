@@ -282,6 +282,9 @@ local function execute_command(cmd)
         if #args == 0 or args[1] == "status" then
             local cap = require("capture")
             M.log("Capture: " .. cap.get_status())
+            local opts = cap.get_options and cap.get_options() or {}
+            if opts.pool then M.log("  pool: " .. tostring(opts.pool)) end
+            if opts.memlog then M.log("  memlog (frames): " .. tostring(opts.memlog)) end
         elseif args[1] == "start" then
             local cap = require("capture")
             local title = table.concat(args, " ", 2)
@@ -296,6 +299,42 @@ local function execute_command(cmd)
             local cap = require("capture")
             cap.stop()
             M.success("Capture stopped")
+        elseif args[1] == "config" then
+            local cap = require("capture")
+            if #args == 1 or args[2] == "get" then
+                local opts = cap.get_options and cap.get_options() or {}
+                M.log("Capture options:")
+                M.log("  pool: " .. tostring(opts.pool))
+            elseif args[2] == "pool" and args[3] then
+                local n = tonumber(args[3])
+                if not n then
+                    M.error("Usage: capture config pool <1-4>")
+                else
+                    if cap.set_option and cap.set_option("pool", n) then
+                        M.success("Set capture pool to " .. n .. ". Restart capture to apply.")
+                    else
+                        M.error("Failed to set capture option")
+                    end
+                end
+            elseif args[2] == "memlog" then
+                local v = args[3]
+                if not v then
+                    M.error("Usage: capture config memlog <frames|0>")
+                else
+                    local n = tonumber(v) or 0
+                    if cap.set_option and cap.set_option("memlog", n) then
+                        if n > 0 then
+                            M.success("Enabled helper memory logging every " .. n .. " frames. Restart capture to apply.")
+                        else
+                            M.success("Disabled helper memory logging. Restart capture to apply.")
+                        end
+                    else
+                        M.error("Failed to set capture option")
+                    end
+                end
+            else
+                M.error("Usage: capture config [get|pool <1-4>|memlog <frames|0>]")
+            end
         elseif args[1] == "dump" or args[1] == "screenshot" or args[1] == "shot" then
             local cap = require("capture")
             local filename = args[2] or ""
@@ -306,7 +345,7 @@ local function execute_command(cmd)
                 M.error("Failed to save screenshot: " .. tostring(out))
             end
         else
-            M.error("Usage: capture [status|start [title...]|stop|dump [filename]]")
+            M.error("Usage: capture [status|start [title...]|stop|config [get|pool <1-4>]|dump [filename]]")
         end
     elseif command == "shader" then
         if #args == 0 or args[1] == "list" then

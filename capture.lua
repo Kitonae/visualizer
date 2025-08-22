@@ -8,6 +8,7 @@ local M = {}
 ffi.cdef[[
     void* CreateFileMappingA(void* hFile, void* lpAttributes, uint32_t flProtect,
                              uint32_t dwMaximumSizeHigh, uint32_t dwMaximumSizeLow, const char* lpName);
+    void* OpenFileMappingA(uint32_t dwDesiredAccess, int bInheritHandle, const char* lpName);
     void* MapViewOfFile(void* hFileMappingObject, uint32_t dwDesiredAccess,
                         uint32_t dwFileOffsetHigh, uint32_t dwFileOffsetLow, size_t dwNumberOfBytesToMap);
     int UnmapViewOfFile(void* lpBaseAddress);
@@ -55,7 +56,6 @@ ffi.cdef[[
     } CaptureSharedFrame;
 ]]
 
-local PAGE_READWRITE = 0x04
 local FILE_MAP_ALL_ACCESS = 0xF001F
 local INVALID_HANDLE_VALUE = ffi.cast("void*", -1)
 local STARTF_USESHOWWINDOW = 0x00000001
@@ -78,6 +78,51 @@ local last_frame = 0
 local image = nil
 local last_w, last_h = 0, 0
 local last_image_data = nil
+
+-- Runtime options for capture helper
+local options = {
+    pool = 1, -- default single buffer to avoid memory growth
+    memlog = 0, -- frames interval for helper memory logging (0=off)
+}
+
+-- Initialize from persisted settings if present
+pcall(function()
+    local settings = require("settings")
+    local p = tonumber(settings.get("capture_pool"))
+    if p and p >= 1 and p <= 4 then options.pool = p end
+    local m = tonumber(settings.get("capture_memlog"))
+    if m and m >= 0 then options.memlog = m end
+end)
+
+function M.set_option(key, value)
+    if key == "pool" then
+        local n = tonumber(value) or options.pool
+        if n < 1 then n = 1 end
+        if n > 4 then n = 4 end
+        options.pool = n
+        append_capture_log(string.format("option: pool=%d", n))
+        pcall(function()
+            local settings = require("settings")
+            settings.set("capture_pool", n); settings.save()
+        end)
+        return true
+    elseif key == "memlog" then
+        local n = tonumber(value) or 0
+        if n < 0 then n = 0 end
+        options.memlog = n
+        append_capture_log(string.format("option: memlog=%d", n))
+        pcall(function()
+            local settings = require("settings")
+            settings.set("capture_memlog", n); settings.save()
+        end)
+        return true
+    end
+    return false
+end
+
+function M.get_options()
+    return { pool = options.pool, memlog = options.memlog }
+end
 
 -- forward declaration for process state check used in start()
 local is_process_running
@@ -133,8 +178,18 @@ local function start_process(window_hint)
         return false
     end
     local cmd = exe
+    local args = {}
     if window_hint and #window_hint > 0 then
-        cmd = string.format("%s --title=\"%s\"", exe, window_hint)
+        table.insert(args, string.format("--title=\"%s\"", window_hint))
+    end
+    if options.pool and tonumber(options.pool) then
+        table.insert(args, string.format("--pool=%d", tonumber(options.pool)))
+    end
+    if options.memlog and tonumber(options.memlog) and tonumber(options.memlog) > 0 then
+        table.insert(args, string.format("--memlog=%d", tonumber(options.memlog)))
+    end
+    if #args > 0 then
+        cmd = string.format("%s %s", exe, table.concat(args, " "))
     end
     local si = ffi.new("STARTUPINFOA")
     si.cb = ffi.sizeof("STARTUPINFOA")
@@ -153,7 +208,8 @@ local function start_process(window_hint)
 end
 
 local function map_shared()
-    shared_memory = ffi.C.CreateFileMappingA(INVALID_HANDLE_VALUE, nil, PAGE_READWRITE, 0, 64*1024*1024, SHARED_MEMORY_NAME)
+    -- Open the mapping created by the helper (sized to actual capture resolution)
+    shared_memory = ffi.C.OpenFileMappingA(FILE_MAP_ALL_ACCESS, 0, SHARED_MEMORY_NAME)
     if shared_memory == nil or shared_memory == ffi.cast("void*", 0) then
         return false
     end

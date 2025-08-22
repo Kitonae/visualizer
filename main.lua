@@ -106,6 +106,20 @@ function love.load()
     }
     render_size_index = 1
     render_width, render_height = render_sizes[render_size_index][1], render_sizes[render_size_index][2]
+    -- Apply persisted sizes if available
+    local ok_settings, settings_mod = pcall(function() return require("settings") end)
+    if ok_settings and settings_mod then
+        local rw = tonumber(settings_mod.get("render_width"))
+        local rh = tonumber(settings_mod.get("render_height"))
+        if rw and rh and rw > 0 and rh > 0 then
+            render_width, render_height = rw, rh
+        end
+        local ww = tonumber(settings_mod.get("window_width"))
+        local wh = tonumber(settings_mod.get("window_height"))
+        if ww and wh and ww > 0 and wh > 0 then
+            pcall(function() love.window.setMode(ww, wh) end)
+        end
+    end
     render_canvas = love.graphics.newCanvas(render_width, render_height)
 
     -- Defer initialization steps to loading sequence
@@ -556,6 +570,12 @@ end
 function love.resize(w, h)
     -- Offscreen render size is independent; only on-screen scaling changes
     print("Window resized to " .. w .. "x" .. h .. " (render/stream unchanged: " .. render_width .. "x" .. render_height .. ")")
+    local ok_settings, settings_mod = pcall(function() return require("settings") end)
+    if ok_settings and settings_mod then
+        settings_mod.set("window_width", w)
+        settings_mod.set("window_height", h)
+        settings_mod.save()
+    end
 end
 
 -- Expose helpers for console commands
@@ -568,6 +588,12 @@ function set_render_size(w, h)
     if shader and shader:hasUniform("resolution") then
         shader:send("resolution", {render_width, render_height})
     end
+    local ok_settings, settings_mod = pcall(function() return require("settings") end)
+    if ok_settings and settings_mod then
+        settings_mod.set("render_width", render_width)
+        settings_mod.set("render_height", render_height)
+        settings_mod.save()
+    end
 end
 
 function match_render_to_window()
@@ -579,4 +605,6 @@ end
 function love.quit()
     if capture and capture.stop then capture.stop() end
     if ndi and ndi.cleanup then ndi.cleanup() end
+    local ok_settings, settings_mod = pcall(function() return require("settings") end)
+    if ok_settings and settings_mod then settings_mod.save() end
 end

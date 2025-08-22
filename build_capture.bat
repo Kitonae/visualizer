@@ -26,7 +26,7 @@ set OUT=build\capture_sender.exe
 
 echo Compiling %SRC% ...
 cl /nologo /std:c++20 /EHsc /permissive- %SRC% ^
-  /link windowsapp.lib d3d11.lib dxgi.lib user32.lib /OUT:%OUT%
+  /link windowsapp.lib d3d11.lib dxgi.lib user32.lib psapi.lib /OUT:%OUT%
 
 if %ERRORLEVEL% NEQ 0 (
   echo Build failed.

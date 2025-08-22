@@ -3,9 +3,11 @@
 #include <thread>
 #include <cstring>
 #include <windows.h>
+#include <psapi.h>
 #include <memory>
 #include <signal.h>
 #include <atomic>
+#include <vector>
 #include <cstddef> // for offsetof
 
 // Global flag for graceful shutdown
@@ -54,6 +56,7 @@ private:
     SharedFrameData* shared_data = nullptr;
     bool should_stop = false;
     std::thread sender_thread;
+    std::vector<uint8_t> reusable_send_buf;
     
     const char* SHARED_MEMORY_NAME = "LOVE_NDI_SHARED_FRAME";
     const uint32_t MAGIC_NUMBER = 0xDEADBEEF;
@@ -160,7 +163,7 @@ public:
     void sender_loop() {
         uint32_t last_frame_number = 0;
         auto start_time = std::chrono::high_resolution_clock::now();
-        
+
         while (!should_stop && !should_exit) {
             // Check if we have new frame data
             if (shared_data->magic != MAGIC_NUMBER) {
@@ -193,6 +196,11 @@ public:
                 std::cout << "Sent frame " << shared_data->frame_number 
                          << " (" << shared_data->width << "x" << shared_data->height 
                          << ") - " << connections << " connections" << std::endl;
+                PROCESS_MEMORY_COUNTERS_EX pmc{};
+                if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc))) {
+                    std::cout << "mem: WS=" << (pmc.WorkingSetSize / (1024*1024))
+                              << "MB, Private=" << (pmc.PrivateUsage / (1024*1024)) << "MB" << std::endl;
+                }
             }
         }
         
@@ -221,18 +229,22 @@ public:
         const uint8_t* src = base + data->buf_offset[idx];
         const size_t bytes = static_cast<size_t>(data->data_size);
 
-        // Always copy to a local buffer to avoid races while sending
-        std::unique_ptr<uint8_t[]> send_buf(new uint8_t[data->width * data->height * 4]);
+        // Always copy to a local buffer to avoid races while sending (reuse to avoid churn)
+        const size_t needed_bytes = static_cast<size_t>(data->width) * data->height * 4;
+        if (reusable_send_buf.size() < needed_bytes) {
+            reusable_send_buf.assign(needed_bytes, 0);
+        }
+        uint8_t* send_buf = reusable_send_buf.data();
         if (data->format == 0) { // RGBA -> BGRA
-            convert_rgba_to_bgra(const_cast<uint8_t*>(src), send_buf.get(), data->width * data->height);
+            convert_rgba_to_bgra(const_cast<uint8_t*>(src), send_buf, data->width * data->height);
         } else {
             // BGRA: copy as-is
-            memcpy(send_buf.get(), src, bytes);
+            memcpy(send_buf, src, bytes);
         }
 
         video_frame.FourCC = NDIlib_FourCC_type_BGRA;
         video_frame.line_stride_in_bytes = data->width * 4;
-        video_frame.p_data = send_buf.get();
+        video_frame.p_data = send_buf;
 
         // Timing
         video_frame.timecode = data->timestamp_us * 10;

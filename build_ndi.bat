@@ -47,7 +47,7 @@ REM Compile the NDI sender
 cl.exe /EHsc /std:c++17 ^
     /I%NDI_INCLUDE% ^
     ndi_sender.cpp ^
-    /link %NDI_LIB%\Processing.NDI.Lib.x64.lib ^
+    /link %NDI_LIB%\Processing.NDI.Lib.x64.lib psapi.lib ^
     /OUT:build\ndi_sender.exe
 
 if %ERRORLEVEL% NEQ 0 (
