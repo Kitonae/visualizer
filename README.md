@@ -31,6 +31,11 @@ A real-time shader visualizer built with LÖVE 2D (Love2D) that includes NDI (Ne
 - **N**: Toggle NDI streaming on/off (automatically manages subprocess)
 - **`** (backtick): Toggle debug console
 - **Q**: Quit application (automatically stops subprocess)
+- **E**: Cycle post-process effect (None, Box Blur, Vignette)
+- **B**: Toggle current post-process on/off
+- **[ / ]**: Decrease/Increase current effect parameter (strength/size)
+- **Alt + Tab**: Cycle post effects (instead of shaders)
+- **Alt + 1..N**: Select effect by number
 
 ## Architecture
 
